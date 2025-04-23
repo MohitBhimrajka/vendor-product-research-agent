@@ -1,13 +1,13 @@
-# test_agent_prompt.py
-
 import asyncio
 import base64
 import os
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional # Added Optional
+from typing import List, Dict, Tuple, Optional, Any # Added Any
 from google import genai
 from google.genai import types
-import prompt_testing
+# Placeholder imports for prompt modules - will create these files later
+# import vendor_prompts
+# import product_prompts
 import tiktoken
 import json
 from datetime import datetime
@@ -16,30 +16,26 @@ from dotenv import load_dotenv
 import time
 import re
 import markdown
-from markdown.extensions import fenced_code, tables, toc, attr_list, def_list, footnotes
-from markdown.extensions.codehilite import CodeHiliteExtension
-from weasyprint import HTML, CSS
-from weasyprint.text.fonts import FontConfiguration
-from jinja2 import Environment, FileSystemLoader
 import yaml
 import logging
-from tqdm import tqdm
 import signal
 import sys
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 from rich.logging import RichHandler
 from rich.panel import Panel
-from bs4 import BeautifulSoup
+
+# Import PDF generator and config (assuming they exist at root level now)
 from pdf_generator import process_markdown_files
-from config import SECTION_ORDER, AVAILABLE_LANGUAGES, PROMPT_FUNCTIONS, LLM_MODEL, LLM_TEMPERATURE
+from config import VENDOR_SECTION_ORDER, PRODUCT_INITIAL_SECTION_ORDER, PRODUCT_FULL_SECTION_ORDER # Example usage
+from config import LLM_MODEL, LLM_TEMPERATURE, OUTPUT_DIR
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(message)s",
     datefmt="[%X]",
-    handlers=[RichHandler(rich_tracebacks=True)]
+    handlers=[RichHandler(rich_tracebacks=True, show_path=False)] # Hide file paths
 )
 logger = logging.getLogger("rich")
 
@@ -59,17 +55,19 @@ def signal_handler(signum, frame):
         console.print("\n[red]Force quitting...[/red]")
         sys.exit(1)
 
-# Register signal handlers (moved to main)
-# signal.signal(signal.SIGINT, signal_handler)
-# signal.signal(signal.SIGTERM, signal_handler)
+# Register signal handlers in main
 
 # Load environment variables from .env file
 load_dotenv()
 
 def count_tokens(text: str) -> int:
     """Count the number of tokens in a text string."""
-    encoding = tiktoken.get_encoding("cl100k_base")  # Using OpenAI's encoding
-    return len(encoding.encode(text))
+    try:
+        encoding = tiktoken.get_encoding("cl100k_base") # Using OpenAI's encoding
+        return len(encoding.encode(text))
+    except Exception as e:
+        logger.warning(f"Tiktoken counting failed: {e}. Returning character count / 4.")
+        return len(text) // 4 # Rough approximation if tiktoken fails
 
 def format_time(seconds: float) -> str:
     """Format time in seconds to a human-readable string."""
@@ -83,16 +81,18 @@ def format_time(seconds: float) -> str:
     remaining_minutes = minutes % 60
     return f"{hours} hours {remaining_minutes} minutes {remaining_seconds:.2f} seconds"
 
-def generate_content(client: genai.Client, prompt: str, output_path: Path) -> Dict:
-    """Generate content for a single prompt and save to file. Returns token counts and timing."""
+def _generate_single_section(client: genai.Client, prompt: str, output_path: Path) -> Dict:
+    """Internal function: Generate content for a single prompt/section."""
     start_time = time.time()
+    input_tokens = 0
+    output_tokens = 0
     try:
-        contents = [
-            types.Content(
-                role="user",
-                parts=[types.Part.from_text(text=prompt)],
-            ),
-        ]
+        # Ensure directory exists
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        input_tokens = count_tokens(prompt)
+
+        contents = [types.Content(role="user", parts=[types.Part.from_text(text=prompt)])]
         tools = [types.Tool(google_search=types.GoogleSearch())]
         generate_content_config = types.GenerateContentConfig(
             temperature=LLM_TEMPERATURE,
@@ -100,34 +100,30 @@ def generate_content(client: genai.Client, prompt: str, output_path: Path) -> Di
             response_mime_type="text/plain",
         )
 
-        # Create output directory if it doesn't exist
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+        response = client.generate_content(
+            model=LLM_MODEL,
+            contents=contents,
+            generation_config=generate_content_config,
+            request_options={'timeout': 600} # Increased timeout to 10 minutes
+        )
 
-        # Count input tokens
-        input_tokens = count_tokens(prompt)
+        # Check for blocked content or missing text
+        if not response.candidates or not response.candidates[0].content.parts:
+             if response.prompt_feedback.block_reason:
+                 raise ValueError(f"Content blocked. Reason: {response.prompt_feedback.block_reason.name}. Details: {response.prompt_feedback.safety_ratings}")
+             else:
+                 raise ValueError("No content generated by the model. Response might be empty.")
 
-        # Collect output text
-        full_output = ""
+        full_output = "".join(part.text for part in response.candidates[0].content.parts if hasattr(part, 'text'))
 
-        # Open file for writing
-        with open(output_path, 'w', encoding='utf-8') as f:
-            response = client.models.generate_content_stream(
-                model=LLM_MODEL,
-                contents=contents,
-                config=generate_content_config,
-            )
+        if not full_output.strip():
+             logger.warning(f"Generated empty content for {output_path.name}. Check prompt or model response.")
+             # Consider if this should be an error or just a warning depending on expected behavior
 
-            for chunk in response:
-                if shutdown_requested:
-                    raise InterruptedError("Generation interrupted by user")
-
-                if chunk.text:
-                    f.write(chunk.text)
-                    f.flush()
-                    full_output += chunk.text
-
-        # Count output tokens
         output_tokens = count_tokens(full_output)
+
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(full_output)
 
         execution_time = time.time() - start_time
         return {
@@ -137,354 +133,293 @@ def generate_content(client: genai.Client, prompt: str, output_path: Path) -> Di
             "execution_time": execution_time,
             "status": "success"
         }
+
     except Exception as e:
         execution_time = time.time() - start_time
         logger.error(f"Error generating content for {output_path.name}: {str(e)}")
+        # Save error details to the file if possible
+        try:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(f"# Generation Error\n\nAn error occurred while generating this section:\n\n```\n{str(e)}\n```")
+        except Exception as write_e:
+            logger.error(f"Additionally, failed to write error details to {output_path.name}: {write_e}")
+
         return {
-            "input_tokens": 0,
+            "input_tokens": input_tokens, # Keep input tokens if prompt was generated
             "output_tokens": 0,
-            "total_tokens": 0,
+            "total_tokens": input_tokens,
             "execution_time": execution_time,
             "status": "error",
             "error": str(e)
         }
 
-def get_user_input() -> tuple[str, Optional[str], Optional[str], list[str], list[tuple[str, str]], str]:
-    """Get company name, optional identifiers, languages, prompts, and context company name from user input."""
-    company_name = input("\nEnter company name: ")
-    ticker = input("Enter Stock Ticker Symbol (optional, press Enter to skip): ").strip() or None
-    industry = input("Enter Primary Industry (optional, press Enter to skip): ").strip() or None
-    context_company_name = input("Enter Context Company Name (default is NESIC): ").strip() or "NESIC"
-
-    print("\nAvailable languages:")
-    for key, lang in AVAILABLE_LANGUAGES.items():
-        print(f"{key}: {lang}")
-
-    while True:
-        languages = input("\nSelect language(s) (1-10, comma separated, default is 1 for Japanese): ").strip()
-        if not languages:
-            languages = "1"
-
-        # Split by comma and remove whitespace
-        language_keys = [key.strip() for key in languages.split(",")]
-
-        # Validate all language keys
-        if all(key in AVAILABLE_LANGUAGES for key in language_keys):
-            break
-        print("Invalid selection. Please choose numbers between 1 and 10, separated by commas.")
-
-    # Prompt selection
-    print("\nAvailable report sections:")
-    for idx, (section_id, prompt_func) in enumerate(PROMPT_FUNCTIONS, 1):
-        print(f"{idx}: {section_id}")
-    print("0: Generate entire report (all sections)")
-
-    while True:
-        sections = input("\nSelect sections (comma-separated numbers, or 0 for all): ").strip()
-        if not sections:
-            sections = "0"
-
-        # Split by comma and remove whitespace
-        section_indices_str = [idx.strip() for idx in sections.split(",")]
-
-        # Validate section indices
-        try:
-            section_indices = [int(idx) for idx in section_indices_str]
-            if 0 in section_indices:
-                selected_prompts = PROMPT_FUNCTIONS
-                break
-            elif all(1 <= idx <= len(PROMPT_FUNCTIONS) for idx in section_indices):
-                # Convert indices to 0-based and get selected prompts
-                selected_prompts = [PROMPT_FUNCTIONS[idx-1] for idx in section_indices]
-                break
-            else:
-                print(f"Invalid selection. Please choose numbers between 0 and {len(PROMPT_FUNCTIONS)}.")
-        except ValueError:
-            print("Invalid input. Please enter numbers separated by commas.")
-
-    return company_name, ticker, industry, language_keys, selected_prompts, context_company_name
-
-def generate_all_prompts(company_name: str, language: str, selected_prompts: list[tuple[str, str]], context_company_name: str, ticker: Optional[str] = None, industry: Optional[str] = None, progress=None, language_task_id=None):
-    """Generate content for selected prompts in parallel, passing identifiers."""
+def _generate_report_sections(
+    research_mode: str, # 'vendor' or 'product'
+    identifier: str, # Vendor name or Product category
+    context_company_name: str,
+    optional_inputs: Dict[str, Any], # Dict for product_category, certs, region etc.
+    section_config: List[Tuple[str, str]], # e.g., VENDOR_SECTION_ORDER
+    prompt_module: Any, # The imported module (vendor_prompts or product_prompts)
+    progress=None # Rich progress object
+    ) -> Tuple[Optional[Dict], Optional[Path]]:
+    """
+    Core function to generate sections for a given mode (vendor/product).
+    This is a placeholder structure to be heavily adapted in later phases.
+    """
     start_time = time.time()
+    global shutdown_requested
 
     # Get API key from .env file
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        raise ValueError("GEMINI_API_KEY not found in .env file")
+        logger.error("GEMINI_API_KEY not found in .env file")
+        return None, None
+    try:
+        client = genai.Client(api_key=api_key)
+    except Exception as e:
+        logger.error(f"Failed to initialize Google GenAI Client: {e}")
+        return None, None
 
-    client = genai.Client(api_key=api_key)
-
-    # Create timestamp for the directory
+    # --- Directory Setup ---
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    # Create base output directory with timestamp
-    base_dir = Path("output") / f"{company_name}_{language}_{timestamp}"
+    sanitized_identifier = re.sub(r'[\\/*?:"<>|]', "", identifier) # Sanitize identifier for path
+    base_dir_name = f"{research_mode}_{sanitized_identifier}_{timestamp}"
+    base_dir = Path(OUTPUT_DIR) / base_dir_name
     base_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create subdirectories
     markdown_dir = base_dir / "markdown"
     pdf_dir = base_dir / "pdf"
     misc_dir = base_dir / "misc"
+    markdown_dir.mkdir(exist_ok=True)
+    pdf_dir.mkdir(exist_ok=True)
+    misc_dir.mkdir(exist_ok=True)
 
-    for dir_path in [markdown_dir, pdf_dir, misc_dir]:
-        dir_path.mkdir(exist_ok=True)
-
-    # Save generation config in misc directory
-    config = {
-        "company_name": company_name,
-        "ticker": ticker,
-        "industry": industry,
-        "language": language,
+    # --- Save Generation Config ---
+    config_data = {
+        "research_mode": research_mode,
+        "identifier": identifier,
+        "context_company_name": context_company_name,
+        "optional_inputs": optional_inputs,
         "timestamp": datetime.now().isoformat(),
-        "sections": [section[0] for section in selected_prompts],  # Only selected sections
+        "sections": [section_id for section_id, _ in section_config],
         "model": LLM_MODEL,
         "temperature": LLM_TEMPERATURE,
-        "context_company_name": context_company_name
     }
-    with open(misc_dir / "generation_config.yaml", "w") as f:
-        yaml.dump(config, f)
+    try:
+        with open(misc_dir / "generation_config.yaml", "w", encoding='utf-8') as f:
+            yaml.dump(config_data, f, allow_unicode=True)
+    except Exception as e:
+        logger.warning(f"Could not save generation config: {e}")
 
-    # Calculate optimal number of workers for prompt generation
-    max_workers_prompts = max(len(selected_prompts), 10)
 
-    # Process all prompts
+    # --- Parallel Section Generation ---
     results = {}
-
-    # If no progress display is provided, create a dummy progress context
+    # If no progress display is provided, create a dummy one
     class DummyProgress:
-        def add_task(self, *args, **kwargs):
-            return None
-        def update(self, *args, **kwargs):
-            pass
-
+        def add_task(self, *args, **kwargs): return None
+        def update(self, *args, **kwargs): pass
     progress = progress or DummyProgress()
 
-    # Create section tasks if we have a real progress display
-    section_tasks = {}
-    if not isinstance(progress, DummyProgress):
-        for prompt_name, _ in selected_prompts:
-            task_desc = f"[green]{language}: {prompt_name:.<30}"
-            section_tasks[prompt_name] = progress.add_task(task_desc, total=1, visible=True)
+    # Create section tasks for progress bar
+    section_tasks = {
+        section_id: progress.add_task(f"[cyan]{section_id:.<30}", total=1, visible=True)
+        for section_id, _ in section_config
+    }
 
-    with ThreadPoolExecutor(max_workers=max_workers_prompts) as executor:
-        futures = []
-        for prompt_name, prompt_func_name in selected_prompts:
+    # Determine max workers (adjust as needed based on API limits/performance)
+    max_workers = min(len(section_config), 10) # Example limit
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {}
+        for section_id, prompt_func_name in section_config:
             if shutdown_requested:
-                break
+                logger.warning(f"Shutdown requested, skipping section: {section_id}")
+                results[section_id] = {"status": "skipped", "error": "Shutdown requested"}
+                continue
 
-            # Get the prompt function from the prompt_testing module
-            prompt_func = getattr(prompt_testing, prompt_func_name)
-            # *** Pass the identifiers to the prompt function ***
-            if prompt_name == "strategy_research":
-                prompt = prompt_func(company_name, language, ticker=ticker, industry=industry, context_company_name=context_company_name)
-            else:
-                prompt = prompt_func(company_name, language, ticker=ticker, industry=industry, context_company_name=context_company_name)
-            output_path = markdown_dir / f"{prompt_name}.md"
+            try:
+                prompt_func = getattr(prompt_module, prompt_func_name)
+                # Prepare arguments for prompt function (adapt as needed per prompt)
+                prompt_args = {
+                    'identifier': identifier, # Pass vendor name or product category
+                    'language': "English", # Hardcoded as multi-language is removed
+                    'context_company_name': context_company_name,
+                    **optional_inputs # Pass optional inputs like certs, region
+                }
+                # Remove keys not expected by the specific prompt function if necessary
+                # (Requires inspecting function signatures - more advanced)
 
-            future = executor.submit(generate_content, client, prompt, output_path)
-            futures.append((prompt_name, future))
+                # Call the appropriate prompt function
+                prompt = prompt_func(**prompt_args) # Pass necessary args
 
-        # Collect results
-        for prompt_name, future in futures:
+                output_path = markdown_dir / f"{section_id}.md"
+                future = executor.submit(_generate_single_section, client, prompt, output_path)
+                futures[future] = section_id
+            except AttributeError:
+                 logger.error(f"Prompt function '{prompt_func_name}' not found in module. Skipping.")
+                 results[section_id] = {"status": "error", "error": f"Prompt function '{prompt_func_name}' not found."}
+                 progress.update(section_tasks[section_id], description=f"[red]{section_id:.<30}✗ (Not Found)", completed=1)
+            except Exception as e:
+                logger.error(f"Error preparing prompt for {section_id}: {e}")
+                results[section_id] = {"status": "error", "error": f"Error preparing prompt: {e}"}
+                progress.update(section_tasks[section_id], description=f"[red]{section_id:.<30}✗ (Prompt Error)", completed=1)
+
+
+        for future in as_completed(futures):
+            section_id = futures[future]
             try:
                 if not shutdown_requested:
                     result = future.result()
-                    results[prompt_name] = result
-
-                    # Update progress for this section
-                    if prompt_name in section_tasks:
-                        progress.update(section_tasks[prompt_name],
-                            advance=1,
-                            description=f"[bold green]{language}: {prompt_name:.<30}✓"
-                        )
-
-                    # Update language-level progress if provided
-                    if language_task_id is not None:
-                        progress.update(language_task_id,
-                            advance=1/len(selected_prompts),
-                            description=f"[cyan]{language} Progress"
-                        )
+                    results[section_id] = result
+                    # Update progress bar
+                    status_char = "✓" if result['status'] == 'success' else "✗"
+                    color = "green" if result['status'] == 'success' else "red"
+                    progress.update(section_tasks[section_id],
+                                    advance=1,
+                                    description=f"[{color}]{section_id:.<30}{status_char}")
                 else:
-                    results[prompt_name] = {
-                        "status": "interrupted",
-                        "error": "Generation interrupted by user"
-                    }
-                    if prompt_name in section_tasks:
-                        progress.update(section_tasks[prompt_name],
-                            description=f"[yellow]{language}: {prompt_name:.<30}⚠"
-                        )
+                    # If shutdown happened while waiting
+                    results[section_id] = {"status": "interrupted", "error": "Shutdown requested"}
+                    progress.update(section_tasks[section_id], description=f"[yellow]{section_id:.<30}⚠ (Interrupted)")
+
             except Exception as e:
-                logger.error(f"Error processing {prompt_name}: {str(e)}")
-                results[prompt_name] = {
-                    "status": "error",
-                    "error": str(e)
-                }
-                if prompt_name in section_tasks:
-                    progress.update(section_tasks[prompt_name],
-                        description=f"[red]{language}: {prompt_name:.<30}✗"
-                    )
+                logger.error(f"Error getting result for {section_id}: {str(e)}")
+                results[section_id] = {"status": "error", "error": str(e)}
+                progress.update(section_tasks[section_id], description=f"[red]{section_id:.<30}✗ (Future Error)", completed=1)
 
+    # --- Compile Stats & Save ---
     total_execution_time = time.time() - start_time
-
-    # Compile token statistics
     token_stats = {
-        "prompts": results,
+        "sections": results,
         "summary": {
             "total_input_tokens": sum(r.get("input_tokens", 0) for r in results.values()),
             "total_output_tokens": sum(r.get("output_tokens", 0) for r in results.values()),
             "total_tokens": sum(r.get("total_tokens", 0) for r in results.values()),
             "total_execution_time": total_execution_time,
+            "formatted_execution_time": format_time(total_execution_time),
             "timestamp": datetime.now().isoformat(),
-            "company_name": company_name,
-            "ticker": ticker,
-            "industry": industry,
-            "language": language,
+            "research_mode": research_mode,
+            "identifier": identifier,
+            "context_company_name": context_company_name,
+            "optional_inputs": optional_inputs,
             "model": LLM_MODEL,
             "temperature": LLM_TEMPERATURE,
-            "context_company_name": context_company_name,
-            "successful_prompts": sum(1 for r in results.values() if r.get("status") == "success"),
-            "failed_prompts": sum(1 for r in results.values() if r.get("status") in ["error", "interrupted"]),
+            "successful_sections": sum(1 for r in results.values() if r.get("status") == "success"),
+            "failed_sections": sum(1 for r in results.values() if r.get("status") not in ["success", "skipped"]),
+            "skipped_sections": sum(1 for r in results.values() if r.get("status") == "skipped"),
             "interrupted": shutdown_requested
         }
     }
 
-    # Save token statistics in misc directory
-    stats_path = misc_dir / "token_usage_report.json"
-    with open(stats_path, 'w', encoding='utf-8') as f:
-        json.dump(token_stats, f, indent=2, ensure_ascii=False)
+    try:
+        stats_path = misc_dir / "generation_summary.json"
+        with open(stats_path, 'w', encoding='utf-8') as f:
+            json.dump(token_stats, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.warning(f"Could not save generation summary JSON: {e}")
 
     return token_stats, base_dir
 
-def main():
+# --- Main Execution Logic (Simplified Placeholder) ---
+def run_vendor_research(vendor_name: str, context_company_name: str, optional_inputs: Dict):
+    """Placeholder function to run vendor research."""
+    console.print(f"\n[bold blue]Starting Vendor Research for: {vendor_name}[/bold blue]")
+    # In Phase 1: Import vendor_prompts and use VENDOR_SECTION_ORDER
+    # result, base_dir = _generate_report_sections(
+    #     research_mode='vendor',
+    #     identifier=vendor_name,
+    #     context_company_name=context_company_name,
+    #     optional_inputs=optional_inputs,
+    #     section_config=VENDOR_SECTION_ORDER, # From config
+    #     prompt_module=vendor_prompts # Imported module
+    # )
+    # --- Mock response for Phase 0 ---
+    logger.info("Vendor research execution placeholder.")
+    mock_base_dir = Path(OUTPUT_DIR) / f"vendor_{vendor_name}_placeholder"
+    mock_base_dir.mkdir(parents=True, exist_ok=True)
+    (mock_base_dir / "markdown").mkdir(exist_ok=True)
+    (mock_base_dir / "pdf").mkdir(exist_ok=True)
+    (mock_base_dir / "misc").mkdir(exist_ok=True)
+    result = {"summary": {"successful_sections": 0, "failed_sections": 0, "total_execution_time": 0.1}}
+    base_dir = mock_base_dir
+    # --- End Mock ---
+
+    if result:
+        console.print(Panel.fit(
+            f"Vendor Research for '{vendor_name}' completed.\n"
+            f"Time: {format_time(result['summary']['total_execution_time'])}\n"
+            f"Successful Sections: [green]{result['summary']['successful_sections']}[/]\n"
+            f"Failed Sections: [red]{result['summary']['failed_sections']}[/]\n"
+            f"Output Dir: {base_dir}",
+            title="Vendor Research Complete", border_style="blue"
+        ))
+        # Add PDF generation call here in Phase 1 if successful sections > 0
+        # pdf_path = process_markdown_files(base_dir, vendor_name, "VendorReport", section_order=VENDOR_SECTION_ORDER) # Pass section order
+    else:
+        console.print(f"[red]Vendor Research for {vendor_name} failed.[/red]")
+
+def run_product_research(product_category: str, context_company_name: str, optional_inputs: Dict):
+    """Placeholder function to run product research."""
+    console.print(f"\n[bold magenta]Starting Product Research for: {product_category}[/bold magenta]")
+    # Complex logic for Phase 2 onwards (initial analysis, interaction, filtering, profiles)
+    logger.info("Product research execution placeholder.")
+    # --- Mock response for Phase 0 ---
+    mock_base_dir = Path(OUTPUT_DIR) / f"product_{product_category}_placeholder"
+    mock_base_dir.mkdir(parents=True, exist_ok=True)
+    (mock_base_dir / "markdown").mkdir(exist_ok=True)
+    (mock_base_dir / "pdf").mkdir(exist_ok=True)
+    (mock_base_dir / "misc").mkdir(exist_ok=True)
+    result = {"summary": {"successful_sections": 0, "failed_sections": 0, "total_execution_time": 0.1}}
+    base_dir = mock_base_dir
+    # --- End Mock ---
+
+    console.print(Panel.fit(
+        f"Product Research for '{product_category}' (placeholder) completed.\n"
+        f"Output Dir: {base_dir}",
+        title="Product Research Complete", border_style="magenta"
+    ))
+
+def main_cli():
+    """Basic CLI interaction for testing (will be replaced by Streamlit app)."""
+    console.print(Panel.fit("[bold]Vendor & Product Research Agent (CLI Runner)[/bold]", border_style="yellow"))
+
+    mode = console.input("Select mode ([1] Vendor / [2] Product): ")
+
+    if mode == '1':
+        vendor_name = console.input("Enter Vendor Name: ")
+        context_company = console.input("Enter Your Company Name (Context): ")
+        prod_cat = console.input("Optional: Product Category from Vendor: ")
+        certs = console.input("Optional: Required Certifications (comma-sep): ")
+        region = console.input("Optional: Geographic Region: ")
+        optional_inputs = {
+            "product_category": prod_cat or None,
+            "required_certs": certs or None,
+            "region": region or None,
+        }
+        run_vendor_research(vendor_name, context_company, optional_inputs)
+    elif mode == '2':
+        product_category = console.input("Enter Product Category: ")
+        context_company = console.input("Enter Your Company Name (Context): ")
+        certs = console.input("Optional: Required Certifications (comma-sep): ")
+        region = console.input("Optional: Geographic Region: ")
+        optional_inputs = {
+            "required_certs": certs or None,
+            "region": region or None,
+        }
+        run_product_research(product_category, context_company, optional_inputs)
+    else:
+        console.print("[red]Invalid mode selected.[/red]")
+
+
+if __name__ == "__main__":
+    # Register signal handlers
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
     try:
-        # Register signal handlers
-        signal.signal(signal.SIGINT, signal_handler)
-        signal.signal(signal.SIGTERM, signal_handler)
-        
-        # Get user input including optional identifiers
-        company_name, ticker, industry, language_keys, selected_prompts, context_company_name = get_user_input()
-
-        tasks = []
-        for language_key in language_keys:
-            language = AVAILABLE_LANGUAGES[language_key]
-            console.print(f"\nGenerating prompts for {company_name} (Ticker: {ticker or 'N/A'}, Industry: {industry or 'N/A'}) in {language}...")
-            console.print(f"Using model: {LLM_MODEL} with temperature: {LLM_TEMPERATURE}")
-            console.print(f"Context Company: {context_company_name}")
-            console.print("Output will be saved in the 'output' directory.\n")
-            # Store identifiers with the task
-            tasks.append((company_name, language, ticker, industry, context_company_name))
-
-        # Calculate optimal number of workers for language-level parallelization
-        # Adjusted calculation slightly based on potential parallel API limits
-        max_workers_languages = min(len(tasks) * 2, 10) # Limit workers slightly
-
-        # Process all languages in parallel using ThreadPoolExecutor
-        results = []
-
-        # Create a single progress display for all languages
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(complete_style="green", finished_style="green"),
-            TaskProgressColumn(),
-            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-            console=console,
-            expand=True
-        ) as progress:
-            # Create language-level progress tasks
-            language_tasks = {
-                lang: progress.add_task(f"[cyan]{lang} Progress", total=len(selected_prompts))
-                for _, lang, _, _, _ in tasks # Iterate through tasks to get lang
-            }
-
-            with ThreadPoolExecutor(max_workers=max_workers_languages) as executor:
-                futures = []
-                # Unpack identifiers when submitting
-                for company, lang, tk, ind, ctx in tasks:
-                    if shutdown_requested:
-                        break
-                    future = executor.submit(
-                        generate_all_prompts,
-                        company,
-                        lang,
-                        selected_prompts,  # Pass selected prompts
-                        ctx,              # Pass context company name
-                        ticker=tk,         # Pass ticker
-                        industry=ind,       # Pass industry
-                        progress=progress,
-                        language_task_id=language_tasks[lang]
-                    )
-                    futures.append((company, lang, future))
-
-                # Collect results
-                for company, lang, future in futures:
-                    try:
-                        if not shutdown_requested:
-                            token_stats, base_dir = future.result()
-                            results.append((lang, token_stats, base_dir))
-
-                            # Display results for this language
-                            console.print(f"\n[bold]Generation Summary for {lang}:[/bold]")
-                            console.print(Panel.fit(
-                                "\n".join([
-                                    f"Total Execution Time: {format_time(token_stats['summary']['total_execution_time'])}",
-                                    f"Total Tokens: {token_stats['summary']['total_tokens']:,}",
-                                    f"Successful Prompts: [green]{token_stats['summary']['successful_prompts']}[/]",
-                                    f"Failed Prompts: [red]{token_stats['summary']['failed_prompts']}[/]"
-                                ]),
-                                title=f"Results - {lang}",
-                                border_style="cyan"
-                            ))
-
-                            # Generate PDF if there were successful prompts and not interrupted
-                            if token_stats['summary']['successful_prompts'] > 0 and not token_stats['summary']['interrupted']:
-                                console.print(f"\n[bold cyan]Generating PDF report for {lang}...[/bold cyan]")
-                                pdf_path = process_markdown_files(base_dir, company_name, lang)
-
-                                if pdf_path:
-                                    console.print(f"\n[green]PDF report generated for {lang}: {pdf_path}[/green]")
-                                else:
-                                    console.print(f"\n[yellow]PDF generation failed for {lang}.[/yellow]")
-                            elif token_stats['summary']['interrupted']:
-                                 console.print(f"\n[yellow]PDF generation skipped for {lang} due to interruption.[/yellow]")
-
-                        else:
-                            console.print(f"\n[yellow]Generation process interrupted for {lang}.[/yellow]")
-                    except Exception as e:
-                        console.print(f"\n[red]Error processing {lang}: {str(e)}[/red]")
-                        logger.exception(f"Error processing {lang}")
-
-        if shutdown_requested:
-            console.print("\n[yellow]Generation process interrupted.[/yellow]")
-            return
-
-        # Display final summary for all languages
-        if results:
-            console.print("\n[bold]Overall Generation Summary:[/bold]")
-            total_execution_time = sum(stats['summary']['total_execution_time'] for _, stats, _ in results)
-            total_tokens = sum(stats['summary']['total_tokens'] for _, stats, _ in results)
-            total_successful = sum(stats['summary']['successful_prompts'] for _, stats, _ in results)
-            total_failed = sum(stats['summary']['failed_prompts'] for _, stats, _ in results)
-
-            console.print(Panel.fit(
-                "\n".join([
-                    f"Total Languages Processed: {len(results)}",
-                    f"Total Execution Time: {format_time(total_execution_time)}",
-                    f"Total Tokens Across All Languages: {total_tokens:,}",
-                    f"Total Successful Prompts: [green]{total_successful}[/]",
-                    f"Total Failed Prompts: [red]{total_failed}[/]"
-                ]),
-                title="Overall Results",
-                border_style="cyan"
-            ))
-
+        # Basic CLI runner for now
+        main_cli()
     except KeyboardInterrupt:
         console.print("\n[yellow]Process interrupted by user.[/yellow]")
     except Exception as e:
-        console.print(f"\nError occurred: {str(e)}")
-        logger.exception("Unexpected error occurred")
-        console.print("Please check your configuration and try again.")
-
-if __name__ == "__main__":
-    main()
+        console.print(f"\n[bold red]An unexpected error occurred:[/]")
+        logger.exception(e) # Log the full traceback

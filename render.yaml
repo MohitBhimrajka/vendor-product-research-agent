@@ -1,10 +1,10 @@
 services:
   - type: web
-    name: company-research-report-generator
+    name: vendor-product-research-agent # Updated name
     env: python
     buildCommand: pip install -r requirements.txt
+    # Ensure app.py is the entry point for Streamlit
     startCommand: streamlit run app.py --server.port=$PORT --server.address=0.0.0.0
     envVars:
       - key: GEMINI_API_KEY
-        sync: false
-    plan: free 
+        sync: false # Keep API key secure
