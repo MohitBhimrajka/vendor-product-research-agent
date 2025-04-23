@@ -1,0 +1,906 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ company_name }} - Enhanced Report</title>
+    <style>
+        @page {
+            size: A4;
+            margin: 2.5cm 2cm; /* Standard margins */
+            @bottom-right {
+                content: "Page " counter(page) " of " counter(pages);
+                font-size: 9pt;
+                color: #666;
+                vertical-align: top; /* Align page number better */
+                padding-top: 1cm;
+            }
+            @bottom-left {
+                content: "{{ company_name }}";
+                font-size: 9pt;
+                color: #666;
+                vertical-align: top;
+                padding-top: 1cm;
+            }
+            @top-right {
+                content: "Made by Supervity";
+                font-size: 9pt;
+                color: #666;
+                vertical-align: bottom;
+                padding-bottom: 1cm;
+            }
+        }
+
+        /* Define named pages for covers, TOC, end */
+        @page cover {
+            margin: 0;
+            @bottom-right { content: normal; }
+            @bottom-left { content: normal; }
+            @top-right { content: normal; }
+        }
+        @page section_cover {
+            margin: 0;
+            @bottom-right { content: normal; }
+            @bottom-left { content: normal; }
+            @top-right { content: normal; }
+        }
+        @page toc {
+            @bottom-right {
+                content: "Page " counter(page) " of " counter(pages);
+                font-size: 9pt;
+                color: #666;
+                vertical-align: top;
+                padding-top: 1cm;
+            }
+            @bottom-left {
+                content: "{{ company_name }}";
+                font-size: 9pt;
+                color: #666;
+                vertical-align: top;
+                padding-top: 1cm;
+            }
+            @top-right {
+                content: "Made by Supervity";
+                font-size: 9pt;
+                color: #666;
+                vertical-align: bottom;
+                padding-bottom: 1cm;
+            }
+        }
+        @page end {
+            margin: 0;
+            @bottom-right { content: normal; }
+            @bottom-left { content: normal; }
+            @top-right { content: normal; }
+            @top-left { content: normal; }
+        }
+
+        /* Global brand colors */
+        :root {
+            --primary-black: #000000;
+            --primary-white: #ffffff;
+            --navy-blue: #000b37;
+            --lime-green: #85c20b;
+            --dark-gray: #474747;
+            --light-gray: #c7c7c7;
+            --soft-blue: #8289ec;
+            --light-lime: #c3fb54;
+            --coral-orange: #ff9a5a;
+            --soft-purple: #b181ff;
+            --bright-cyan: #31b8e1;
+            --light-pink: #ff94a8;
+        }
+
+        body {
+            font-family: 'Noto Sans', 'Noto Sans JP', 'Helvetica Neue', 'Arial', sans-serif;
+            line-height: 1.5;
+            font-size: 10pt;
+            color: var(--dark-gray);
+            margin: 0;
+            padding: 0;
+        }
+
+        * { box-sizing: border-box; }
+
+        /* --- Heading Styles --- */
+        h1, h2, h3, h4, h5, h6 {
+            margin-top: 1.5em;
+            margin-bottom: 0.5em;
+            page-break-after: avoid;
+            color: var(--navy-blue);
+            font-weight: bold;
+        }
+        h1 { font-size: 18pt; } /* Main report title on cover */
+        h2 { font-size: 14pt; border-bottom: 1px solid #eee; padding-bottom: 0.2em; } /* Section titles */
+        h3 { font-size: 12pt; }
+        h4 { font-size: 11pt; font-weight: bold; color: #34495e; } /* Slightly lighter */
+        h5, h6 { font-size: 10pt; font-weight: bold; color: #7f8c8d; } /* Grayer */
+
+        p, ul, ol {
+            margin-top: 0.5em; /* Tighter spacing */
+            margin-bottom: 0.5em;
+            text-align: justify;
+            hyphens: auto; /* Enable hyphenation */
+        }
+        ul, ol { padding-left: 1.5em; }
+        li { margin-bottom: 0.3em; }
+
+        /* Sources section - minimal styling for links in content */
+        a { color: var(--soft-blue); text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        a.long-url {
+            word-wrap: break-word;
+            font-size: 0.85em; /* Slightly smaller */
+            color: #7f8c8d; /* Gray */
+            font-family: monospace;
+        }
+
+        /* --- Cover Page --- */
+        .cover {
+            page: cover;
+            width: 100%;
+            min-height: 29.7cm;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            page-break-after: always;
+            background: linear-gradient(135deg, var(--primary-white) 0%, #f8f9fa 100%);
+            border: none;
+            padding: 0;
+            position: relative;
+            overflow: hidden;
+            border: 1px solid #eee;
+        }
+        .cover::before {
+            content: "";
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 15px;
+            background: linear-gradient(90deg, var(--lime-green), var(--navy-blue));
+        }
+        .cover::after {
+            content: "";
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 10px;
+            background: linear-gradient(90deg, var(--navy-blue), var(--lime-green));
+        }
+        .cover-wrapper {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            width: 100%;
+            padding: 4cm 3cm;
+            position: relative;
+            z-index: 1;
+        }
+        .cover-logo {
+            width: auto;
+            height: 100px;
+            margin-bottom: 3cm;
+            object-fit: contain;
+            object-position: center;
+        }
+        .cover-content {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 4cm;
+        }
+        .cover h1 {
+            font-size: 36pt;
+            margin: 0 0 1cm 0;
+            color: var(--navy-blue);
+            font-weight: bold;
+            line-height: 1.2;
+            letter-spacing: -0.02em;
+        }
+        .cover .subtitle {
+            font-size: 24pt;
+            margin: 0 0 2cm 0;
+            color: var(--soft-blue);
+            font-weight: normal;
+            line-height: 1.3;
+        }
+        .cover .date {
+            font-size: 14pt;
+            color: #7f8c8d;
+            margin: 0;
+            font-weight: normal;
+        }
+        .cover-footer {
+            position: absolute;
+            bottom: 3cm;
+            left: 0;
+            width: 100%;
+            padding: 0 2cm;
+            font-size: 12pt;
+            color: #95a5a6;
+            text-align: center;
+            line-height: 1.5;
+        }
+
+        /* Table of Contents Styles */
+        .table-of-contents {
+            padding: 1.5cm 2cm;
+            page: toc;
+            background: linear-gradient(180deg, #f9f9f9 0%, #ffffff 100%);
+        }
+        
+        /* New TOC styles */
+        .toc-container {
+            margin: 1em auto;
+            max-width: 800px;
+            background: white;
+            padding: 1.5cm;
+            border-radius: 8px;
+            border: 1px solid #eee;
+        }
+        
+        .toc-title {
+            font-size: 24pt;
+            color: var(--navy-blue);
+            margin-bottom: 1.5em;
+            text-align: center;
+            font-weight: bold;
+            letter-spacing: 0.05em;
+            border-bottom: none;
+            position: relative;
+            padding-bottom: 0.5cm;
+        }
+        
+        .toc-title::after {
+            content: "";
+            position: absolute;
+            bottom: 0;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 10cm;
+            height: 2px;
+            background: linear-gradient(90deg, transparent, var(--lime-green), transparent);
+        }
+        
+        .toc-entries {
+            padding: 0 1em;
+        }
+        
+        .toc-entry {
+            margin: 0.8em 0;
+            position: relative;
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+        }
+        
+        .toc-entry::after {
+            content: "";
+            position: absolute;
+            bottom: 0.5em;
+            left: 0;
+            right: 0;
+            border-bottom: 1px dotted #c7c7c7;
+            z-index: 1;
+        }
+        
+        .toc-link {
+            font-weight: bold;
+            font-size: 12pt;
+            color: #000b37;
+            text-decoration: none;
+            background: white;
+            padding-right: 0.5em;
+            position: relative;
+            z-index: 2;
+            display: inline-block;
+            width: auto;
+            max-width: 85%;
+        }
+        
+        .toc-link::after {
+            content: target-counter(attr(href), page);
+            position: absolute;
+            right: -3em;
+            background: white;
+            padding: 0 0.5em;
+            color: #474747;
+            z-index: 2;
+            font-weight: normal;
+        }
+        
+        .toc-subsections {
+            margin-left: 2em;
+            margin-top: 0.5em;
+            width: 100%;
+        }
+        
+        .toc-subsection {
+            margin: 0.4em 0;
+            position: relative;
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+        }
+        
+        .toc-subsection::after {
+            content: "";
+            position: absolute;
+            bottom: 0.3em;
+            left: 0;
+            right: 0;
+            border-bottom: 1px dotted #c7c7c7;
+            z-index: 1;
+        }
+        
+        .toc-sublink {
+            font-size: 10pt;
+            color: #474747;
+            text-decoration: none;
+            background: white;
+            padding-right: 0.5em;
+            position: relative;
+            z-index: 2;
+            display: inline-block;
+            width: auto;
+            max-width: 85%;
+        }
+        
+        .toc-sublink::after {
+            content: target-counter(attr(href), page);
+            position: absolute;
+            right: -3em;
+            background: white;
+            padding: 0 0.5em;
+            color: #474747;
+            z-index: 2;
+            font-weight: normal;
+        }
+
+        /* Legacy styles - keep for compatibility */
+        .toc-header {
+            font-size: 18pt; /* Smaller font size */
+            color: var(--navy-blue);
+            margin-bottom: 1cm; /* Reduced margin */
+            text-align: center;
+            font-weight: bold;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .toc-navigation {
+            padding: 0;
+        }
+        .toc-list {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+        .toc-item {
+            margin: 0;
+            padding: 0;
+        }
+        .toc-line {
+            display: flex;
+            align-items: baseline;
+            width: 100%;
+            margin: 4px 0; /* Reduced spacing between items */
+            position: relative;
+        }
+        .toc-line::after {
+            content: "";
+            position: absolute;
+            bottom: 4px;
+            left: 0;
+            right: 0;
+            border-bottom: 1px dotted var(--light-gray);
+            z-index: 1;
+        }
+        .toc-number {
+            background: white;
+            color: var(--lime-green);
+            padding-right: 8px;
+            font-weight: 600;
+            min-width: 1.5em;
+            z-index: 2;
+        }
+        .toc-item a {
+            background: white;
+            padding-left: 4px;
+            padding-right: 8px;
+            color: var(--navy-blue);
+            text-decoration: none;
+            z-index: 2;
+            margin-right: auto;
+        }
+        .toc-item a::after {
+            content: target-counter(attr(href), page);
+            position: absolute;
+            right: 0;
+            background: white;
+            padding-left: 8px;
+            color: var(--dark-gray);
+            z-index: 2;
+        }
+        .toc-item.level-1 {
+            margin-top: 0.8em; /* Reduced top margin */
+            font-weight: 600;
+            font-size: 11pt; /* Slightly smaller */
+        }
+        .toc-item.level-1:first-child {
+            margin-top: 0;
+        }
+        .toc-sublist {
+            list-style: none;
+            padding: 0;
+            margin: 0.2em 0 0.5em 1.5cm; /* Reduced margins and indentation */
+        }
+        .toc-item.level-2 {
+            font-weight: normal;
+            font-size: 10pt; /* Smaller font size */
+            color: #34495e;
+            margin: 2px 0; /* Tighter spacing between subsections */
+        }
+        .toc-item.level-2 .toc-number {
+            color: var(--soft-blue);
+            font-weight: normal;
+        }
+
+        /* Section Cover Styles */
+        .section-cover {
+            page: section_cover;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            page-break-after: always;
+            background: linear-gradient(145deg, #f8f9fa 0%, #f1f1f1 100%);
+            min-height: 29.7cm;
+            padding: 4cm 3cm;
+            position: relative;
+            border: 1px solid #eee;
+        }
+        .section-cover::before {
+            content: "";
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 15px;
+            height: 100%;
+            background: linear-gradient(to bottom, var(--lime-green), var(--light-lime));
+            border-right: 1px solid rgba(0, 0, 0, 0.05);
+        }
+        .section-cover h2 {
+            font-size: 32pt;
+            margin-bottom: 2cm;
+            color: var(--navy-blue);
+            border: none;
+            font-weight: bold;
+            line-height: 1.2;
+            position: relative;
+            padding-bottom: 0.5cm;
+        }
+        .section-cover h2::after {
+            content: "";
+            position: absolute;
+            bottom: 0;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 10cm;
+            height: 2px;
+            background: linear-gradient(90deg, transparent, var(--lime-green), transparent);
+        }
+        .section-cover .subsections {
+            margin: 0 auto;
+            text-align: center;
+            width: 80%;
+            max-width: 600px;
+            background: rgba(255, 255, 255, 0.7);
+            padding: 1.5cm;
+            border-radius: 8px;
+            border: 1px solid #eee;
+        }
+        .section-cover .subsections h3 {
+            font-size: 18pt;
+            color: var(--soft-blue);
+            margin-bottom: 1.5cm;
+            border: none;
+            font-weight: normal;
+        }
+        .section-cover .subsections p {
+            text-align: center;
+            margin: 0.8em 0;
+            font-size: 12pt;
+            color: #34495e;
+            line-height: 1.6;
+        }
+        .section-cover .reading-time {
+            margin-top: 3cm;
+            font-size: 12pt;
+            color: #7f8c8d;
+            font-style: italic;
+            background: rgba(255, 255, 255, 0.8);
+            padding: 0.5cm 1cm;
+            border-radius: 50px;
+            border: 1px solid #eee;
+        }
+        .section-cover .reading-time-value {
+            font-weight: bold;
+            color: var(--navy-blue);
+        }
+        .section-cover .subsections p.section-topic {
+            text-align: left;
+            margin: 0.8em 0;
+            font-size: 12pt;
+            color: #34495e;
+            line-height: 1.6;
+            padding-left: 1em;
+            text-indent: -1em;
+        }
+
+        /* Figures and Tables */
+        figure {
+            margin: 1.5em 0;
+            page-break-inside: avoid; /* Keep figures together */
+            text-align: center;
+        }
+        figcaption {
+            font-style: italic;
+            font-size: 9pt;
+            color: #7f8c8d;
+            text-align: center;
+            margin-top: 0.5em;
+        }
+        figure img {
+            max-width: 100%;
+            height: auto;
+            margin: 0 auto;
+            display: block;
+            border: 1px solid #ddd;
+            padding: 2px;
+        }
+
+        /* Table Styles */
+        .enhanced-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 0.75em 0;
+            page-break-inside: auto;
+        }
+
+        .enhanced-table thead {
+            display: table-header-group;
+            background-color: rgba(0, 11, 55, 0.05); /* Subtle navy blue */
+        }
+
+        .enhanced-table tbody {
+            page-break-inside: auto;
+        }
+
+        .enhanced-table tr {
+            page-break-inside: avoid;
+            page-break-after: auto;
+        }
+
+        .enhanced-table th {
+            background-color: rgba(0, 11, 55, 0.05);
+            border-bottom: 2px solid var(--navy-blue);
+            padding: 6px 8px;
+            text-align: left;
+            font-weight: 600;
+            color: var(--navy-blue);
+            white-space: normal;
+            word-wrap: break-word;
+        }
+
+        .enhanced-table td {
+            border-bottom: 1px solid #dee2e6;
+            padding: 4px 8px;
+            vertical-align: top;
+            white-space: normal;
+            word-wrap: break-word;
+        }
+
+        .enhanced-table .text-right {
+            text-align: right;
+        }
+
+        /* Ensure tables don't overflow page margins */
+        .enhanced-table td, .enhanced-table th {
+            word-wrap: break-word;
+            max-width: 300px;
+        }
+
+        .enhanced-table tr:nth-child(even) td { 
+            background-color: rgba(133, 194, 11, 0.05); /* Subtle lime green */
+        }
+        
+        .enhanced-table tr:hover td { 
+            background-color: rgba(130, 137, 236, 0.1); /* Subtle soft blue */
+        }
+        
+        /* Table wrapper adjustments */
+        .table-responsive {
+            margin: 0.75em 0; /* Reduced margin */
+            width: 100%;
+        }
+        .text-right { text-align: right; }
+        .text-center { text-align: center; }
+
+        /* --- Code & Quotes --- */
+        pre {
+            background-color: #ecf0f1;
+            padding: 10px;
+            border: 1px solid #bdc3c7;
+            border-radius: 4px;
+            overflow-x: auto;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 9pt;
+            line-height: 1.4;
+            page-break-inside: avoid;
+            white-space: pre-wrap;
+        }
+        code {
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 0.9em;
+            background-color: #ecf0f1;
+            padding: 2px 4px;
+            border-radius: 3px;
+            color: #2c3e50;
+        }
+        blockquote {
+            margin: 1.5em 0;
+            padding: 1em 1.5em;
+            border-left: 5px solid var(--lime-green);
+            background-color: rgba(133, 194, 11, 0.05);
+            color: var(--dark-gray);
+            page-break-inside: avoid;
+        }
+        blockquote p { margin: 0; font-style: italic; }
+        blockquote footer {
+            font-size: 0.9em;
+            color: #777;
+            margin-top: 0.5em;
+            text-align: right;
+            font-style: normal;
+        }
+
+        /* --- Section Content --- */
+        .section {
+            padding-top: 1em;
+        }
+
+        .section-intro {
+            font-size: 11pt;
+            font-style: italic;
+            color: #555;
+            margin-bottom: 1.5em;
+            padding-bottom: 0.5em;
+            border-bottom: 1px dotted #ccc;
+        }
+
+        /* --- End Page --- */
+        .end-page {
+            page: end;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            background: linear-gradient(135deg, #f8f9fa 0%, #ffffff 100%);
+            height: 29.7cm;
+            position: relative;
+            border: 1px solid #eee;
+        }
+        .end-page::before {
+            content: "";
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 10px;
+            background: linear-gradient(90deg, var(--navy-blue), var(--lime-green));
+        }
+        .end-page::after {
+            content: "";
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 10px;
+            background: linear-gradient(90deg, var(--lime-green), var(--navy-blue));
+        }
+        .end-page-content {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            max-width: 600px;
+            padding: 2cm;
+            background: rgba(255, 255, 255, 0.8);
+            border-radius: 10px;
+            border: 1px solid #eee;
+        }
+        .end-page h2 {
+            font-size: 32pt;
+            margin-bottom: 1cm;
+            color: var(--navy-blue);
+            border-bottom: none;
+        }
+        .end-page p { 
+            font-size: 14pt; 
+            color: #34495e;
+            margin-bottom: 1cm;
+        }
+        .end-page .contact {
+            font-size: 12pt;
+            margin-top: 2cm;
+            color: #7f8c8d;
+            border-top: 1px solid rgba(0, 0, 0, 0.1);
+            padding-top: 1cm;
+            width: 100%;
+        }
+
+        /* Page break control utilities */
+        .page-break-before { page-break-before: always; }
+        .page-break-after { page-break-after: always; }
+        .avoid-break { page-break-inside: avoid; }
+
+        /* Image handling and debugging */
+        img.debug-border {
+            border: 1px solid red;
+        }
+
+        /* Favicon styling */
+        .favicon {
+            width: 20px;
+            height: 20px;
+            object-fit: contain;
+        }
+
+        .header-icons {
+            position: absolute;
+            top: 2cm;
+            left: 2cm;
+        }
+
+        /* Debug elements - always hidden */
+        .header-debug {
+            display: none !important;
+        }
+
+        /* --- Section Headings --- */
+        .section-number {
+            color: var(--lime-green);
+            margin-right: 0.5em;
+            font-weight: bold;
+        }
+        
+        /* Fix header anchors */
+        h2[id], h3[id], h4[id] {
+            scroll-margin-top: 2em;
+            position: relative;
+        }
+        
+        /* Section content styling */
+        .section-content {
+            margin-bottom: 2cm;
+        }
+
+        /* Enhanced list styles */
+        .enhanced-list {
+            padding-left: 1.5em;
+            margin: 0.8em 0;
+            list-style-type: disc;
+        }
+        
+        .enhanced-list-item {
+            margin-bottom: 0.3em;
+            text-align: left;
+        }
+        
+        .nested-list {
+            padding-left: 1.5em;
+            margin: 0.5em 0;
+            list-style-type: circle;
+        }
+        
+        .nested-list-item {
+            margin-bottom: 0.2em;
+        }
+        
+        /* Paragraph list style for content that might not be processed as proper lists */
+        p.bullet-point {
+            position: relative;
+            padding-left: 1.5em;
+            margin: 0.3em 0;
+            text-align: left;
+        }
+        
+        p.bullet-point::before {
+            content: "•";
+            position: absolute;
+            left: 0.5em;
+            color: var(--navy-blue);
+        }
+    </style>
+</head>
+<body>
+    <!-- Cover Page -->
+    <div class="cover">
+        <div class="cover-wrapper">
+            <div class="header-icons">
+                <img src="{{ favicon_path }}" alt="Favicon" class="favicon">
+            </div>
+            <img src="{{ logo_path }}" alt="Company Logo" class="cover-logo">
+            <!-- Debug info - remove in production -->
+            <div style="display:none">Logo path: {{ logo_path }}</div>
+            <div style="display:none">Favicon path: {{ favicon_path }}</div>
+            
+            <div class="cover-content">
+                <h1>{{ company_name }}</h1>
+                <div class="subtitle">Comprehensive Report</div>
+                <div class="date">Generated on {{ generation_date }}</div>
+            </div>
+            <div class="cover-footer">
+                A creation of the Supervity Customer Research AI Agent
+            </div>
+        </div>
+    </div>
+
+    <!-- Table of Contents -->
+    <div class="table-of-contents">
+        {{ toc | safe }}
+    </div>
+
+    <!-- Content Sections -->
+    {% for section in sections %}
+        <!-- Section Cover -->
+        <div class="section-cover">
+            <h2>{{ section.title }}</h2>
+            
+            <div class="subsections">
+                <h3>In this section:</h3>
+                {% if section.key_topics %}
+                    {% for topic in section.key_topics %}
+                    <p class="section-topic">• {{ topic }}</p>
+                    {% endfor %}
+                {% else %}
+                    <p class="section-topic">• {{ section.title }}</p>
+                {% endif %}
+            </div>
+            
+            <div class="reading-time">
+                Estimated reading time: <span class="reading-time-value">{{ section.reading_time }} minutes</span>
+            </div>
+        </div>
+
+        <!-- Section Content -->
+        <div class="section-content">
+            <h2 id="section-{{ section.id }}">{{ section.title }}</h2>
+            {{ section.html_content | safe }}
+        </div>
+    {% endfor %}
+
+    <!-- Attribution -->
+    <div class="attribution">
+        A creation of the Supervity Customer Research AI Agent
+    </div>
+
+    <!-- End Page -->
+    <div class="end-page">
+        <div class="end-page-content">
+            <h2>Thank You</h2>
+            <p>End of the report for {{ company_name }}</p>
+            <div class="contact">
+                <p>For any questions or additional information, please reach out.</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
