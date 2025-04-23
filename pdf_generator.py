@@ -942,44 +942,72 @@ class EnhancedPDFGenerator:
 
         return metadata, main_content, sources_content
 
-def process_markdown_files(base_dir: Path, company_name: str, language: str, template_path: Optional[str] = None) -> Optional[Path]:
-    """Process all markdown files in the markdown directory and generate a PDF."""
+def process_markdown_files(base_dir: Path, identifier: str, report_type_name: str, section_order: Optional[List[Tuple[str, str]]] = None, template_path: Optional[str] = None) -> Optional[Path]:
+    """
+    Process markdown files based on a given section order and generate a PDF.
+    'identifier' is vendor name or product category.
+    'report_type_name' is used for the PDF filename (e.g., "VendorReport", "ProductReport").
+    'section_order' is the list of (id, title) tuples to determine order and titles.
+    """
     markdown_dir = base_dir / 'markdown'
     pdf_dir = base_dir / 'pdf'
     os.makedirs(pdf_dir, exist_ok=True)
-    
-    # Collect sections from markdown files
+
     sections = []
+    print(f"Looking for markdown files in: {markdown_dir}")
+
+    # Use section_order if provided, otherwise fall back to SECTION_ORDER from config
+    if section_order is None:
+        section_order = SECTION_ORDER
     
-    # Use SECTION_ORDER to determine the correct order of sections
-    for section_id, section_title in SECTION_ORDER:
+    print(f"Using section order: {[s[0] for s in section_order]}")
+
+    if not section_order:
+         print("Error: No section order provided or available in config.")
+         return None
+
+    for section_id, section_title in section_order:
         file_path = markdown_dir / f"{section_id}.md"
         if file_path.exists():
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-            
-            if content.strip():  # Only include non-empty sections
-                section = PDFSection(
-                    id=section_id,
-                    title=section_title,
-                    content=content
-                )
-                sections.append(section)
-    
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                if content.strip():
+                    section = PDFSection(
+                        id=section_id,
+                        title=section_title,
+                        content=content
+                    )
+                    sections.append(section)
+                    # print(f"Found and added section: {section_id}") # Debug print
+                else:
+                    print(f"Skipping empty section file: {file_path.name}")
+            except Exception as e:
+                 print(f"Error reading section file {file_path}: {e}")
+        else:
+             print(f"Section file not found, skipping: {file_path.name}")
+
     if not sections:
-        print("No markdown files found or all files were empty.")
+        print("No non-empty markdown sections found to generate PDF.")
         return None
-    
-    # Generate PDF
+
     pdf_generator = EnhancedPDFGenerator(template_path)
-    output_path = pdf_dir / f"{company_name}_{language}_Report.pdf"
-    
+    # Sanitize identifier for filename
+    safe_identifier = re.sub(r'[\\/*?:"<>| ]', "_", identifier)
+    output_filename = f"{safe_identifier}_{report_type_name}.pdf"
+    output_path = pdf_dir / output_filename
+
+    # Pass necessary metadata for the template
+    pdf_metadata = {
+        'title': f"{identifier} - {report_type_name}",
+        'identifier': identifier, # Pass the vendor/product name
+        'language': 'English', # Hardcoded for now
+        'report_type': report_type_name
+        # Add other metadata if needed by the template
+    }
+
     return pdf_generator.generate_pdf(
-        sections, 
-        str(output_path), 
-        {
-            'title': f"{company_name} {language} Report",
-            'company': company_name,
-            'language': language
-        }
+        sections,
+        str(output_path),
+        pdf_metadata
     ) 
