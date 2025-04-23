@@ -536,341 +536,389 @@ class EnhancedPDFGenerator:
         return intro_html
 
     def generate_pdf(self, sections_data: List[PDFSection], output_path: str, metadata: Dict) -> Path:
-        """Generate a PDF report from the provided section data and metadata."""
-        processed_sections = self._process_sections(sections_data)
-
-        # Get paths for logo and favicon
-        template_dir = Path(self.template_dir)
-        assets_dir = template_dir / 'assets'
-        os.makedirs(assets_dir, exist_ok=True)
-        
-        # Directly use the assets in templates/assets
-        logo_path = assets_dir / 'supervity_logo.png'
-        favicon_path = assets_dir / 'supervity_favicon.png'
-        
-        # Use proper URLs for WeasyPrint
-        logo_url = f"templates/assets/supervity_logo.png"
-        favicon_url = f"templates/assets/supervity_favicon.png"
-        
-        print(f"Using logo URL: {logo_url}")
-        print(f"Using favicon URL: {favicon_url}")
-
-        # Prepare template context
-        context = {
-            'company_name': metadata.get('company', 'Company'),
-            'language': metadata.get('language', 'English'),
-            'generation_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'sections': processed_sections,
-            'toc': self._generate_toc(processed_sections),
-            'metadata': metadata,
-            'logo_path': logo_url,
-            'favicon_path': favicon_url
-        }
-
-        # Render template and generate PDF
-        final_html_content = self.template.render(**context)
-
+        """Generate a PDF report from processed markdown sections."""
         try:
-            # Get the base directory for proper resource resolution
-            base_url = os.path.dirname(os.path.abspath(__file__))
-            print(f"Using base URL: {base_url}")
+            # Process all sections to extract metadata and convert to HTML
+            processed_sections = self._process_sections(sections_data)
             
-            html = HTML(string=final_html_content, base_url=base_url)
-            # Define font config (consider making this configurable)
+            # Render the HTML template with the processed sections
+            rendered_html = self.template.render(
+                title=metadata.get('title', 'Generated Report'),
+                identifier=metadata.get('identifier', ''),
+                language=metadata.get('language', 'English'),
+                sections=processed_sections,
+                report_type=metadata.get('report_type', 'Report'),
+                generation_timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                toc=self._generate_toc(processed_sections),
+                **metadata  # Pass along all other metadata
+            )
+            
+            # Save the HTML to a file for debugging if needed
+            output_html_path = Path(output_path).with_suffix('.html')
+            with open(output_html_path, 'w', encoding='utf-8') as f:
+                f.write(rendered_html)
+            
+            # Function to generate the PDF using WeasyPrint
+            return self._generate_pdf_from_html(rendered_html, output_path, metadata)
+            
+        except Exception as e:
+            print(f"Error generating PDF: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
+
+    def _generate_pdf_from_html(self, html_content: str, output_path: str, metadata: Dict) -> Path:
+        """Generate a PDF from the rendered HTML content."""
+        try:
+            # Configure fonts
             font_config = FontConfiguration()
-            css = CSS(string='''
-                @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700&family=Noto+Sans:wght@400;700&display=swap');
-                
-                /* Base styles */
-                body { 
-                    font-family: 'Noto Sans', 'Noto Sans JP', sans-serif;
-                    line-height: 1.6;
+            
+            # Create the HTML object for WeasyPrint
+            html = HTML(string=html_content)
+            
+            # Create the PDF
+            css_string = """
+                @page {
+                    margin: 1cm 1.5cm;
+                    @top-center {
+                        content: string(title);
+                        font-size: 9pt;
+                        color: #666;
+                    }
+                    @bottom-center {
+                        content: "Page " counter(page) " of " counter(pages);
+                        font-size: 9pt;
+                        color: #666;
+                    }
                 }
                 
-                /* Table of contents styles */
-                .toc-container {
-                    margin: 1em 0 2em 0;
+                /* Title styling for running header */
+                h1 {
+                    string-set: title content();
+                    page-break-before: always;
+                    break-before: page;
                 }
                 
-                .toc-title {
-                    font-size: 18pt;
-                    color: #000b37;
-                    margin-bottom: 1.5em;
-                    text-align: center;
-                    font-weight: bold;
-                    letter-spacing: 0.05em;
-                    border-bottom: none;
+                /* Fix first page not having page break */
+                section:first-of-type h1 {
+                    page-break-before: avoid;
+                    break-before: avoid;
                 }
                 
-                .toc-entries {
-                    padding: 0 1em;
-                }
-                
-                .toc-entry {
-                    margin: 0.8em 0;
-                    position: relative;
-                    display: flex;
-                    align-items: baseline;
-                    justify-content: space-between;
-                }
-                
-                .toc-entry::after {
-                    content: "";
-                    position: absolute;
-                    bottom: 0.5em;
-                    left: 0;
-                    right: 0;
-                    border-bottom: 1px dotted #c7c7c7;
-                    z-index: 1;
-                }
-                
-                .toc-link {
-                    font-weight: bold;
-                    font-size: 12pt;
-                    color: #000b37;
-                    text-decoration: none;
-                    background: white;
-                    padding-right: 0.5em;
-                    position: relative;
-                    z-index: 2;
-                    display: inline-block;
-                    width: auto;
-                    max-width: calc(100% - 4em);
-                }
-                
-                .toc-link::after {
-                    content: target-counter(attr(href), page);
-                    position: absolute;
-                    right: -4em;
-                    background: white;
-                    padding: 0 0.5em;
-                    color: #474747;
-                    z-index: 2;
-                    font-weight: normal;
-                }
-                
-                .toc-subsections {
-                    margin-left: 2em;
-                    margin-top: 0.5em;
-                    width: 100%;
-                }
-                
-                .toc-subsection {
-                    margin: 0.4em 0;
-                    position: relative;
-                    display: flex;
-                    align-items: baseline;
-                    justify-content: space-between;
-                }
-                
-                .toc-subsection::after {
-                    content: "";
-                    position: absolute;
-                    bottom: 0.3em;
-                    left: 0;
-                    right: 0;
-                    border-bottom: 1px dotted #c7c7c7;
-                    z-index: 1;
-                }
-                
-                .toc-sublink {
-                    font-size: 10pt;
-                    color: #474747;
-                    text-decoration: none;
-                    background: white;
-                    padding-right: 0.5em;
-                    position: relative;
-                    z-index: 2;
-                    display: inline-block;
-                    width: auto;
-                    max-width: calc(100% - 3em);
-                }
-                
-                .toc-sublink::after {
-                    content: target-counter(attr(href), page);
-                    position: absolute;
-                    right: -3em;
-                    background: white;
-                    padding: 0 0.5em;
-                    color: #474747;
-                    z-index: 2;
-                    font-weight: normal;
-                }
-                
-                /* Enhanced list styles */
-                .enhanced-list {
-                    list-style-type: disc;
-                    margin: 0.8em 0;
-                    padding-left: 1.5em;
-                    line-height: 1.4;
-                }
-                
-                .enhanced-list-item {
-                    margin-bottom: 0.4em;
-                    position: relative;
-                    padding-left: 0.2em;
-                }
-                
-                .nested-list {
-                    list-style-type: circle;
-                    margin: 0.4em 0 0.4em 0.5em;
-                    padding-left: 1.5em;
-                }
-                
-                .nested-list-item {
-                    margin-bottom: 0.3em;
-                }
-                
-                /* Force proper bullet rendering */
-                ul.enhanced-list > li::marker {
-                    color: #474747;
-                    font-size: 0.9em;
-                }
-                
-                ul.nested-list > li::marker {
-                    color: #7f8c8d;
-                    font-size: 0.85em;
-                }
-                
-                /* Additional styling for ordered lists */
-                ol.enhanced-list {
-                    list-style-type: decimal;
-                }
-                
-                ol.nested-list {
-                    list-style-type: lower-alpha;
-                }
-                
-                ol.nested-list ol.nested-list {
-                    list-style-type: lower-roman;
-                }
-                
-                /* Handle mixed nested list types */
-                ul.enhanced-list ol.nested-list {
-                    list-style-type: decimal;
-                }
-                
-                ol.enhanced-list ul.nested-list {
-                    list-style-type: disc;
-                }
-                
-                /* Deeply nested list styles (3+ levels) */
-                .level-3 {
-                    margin-left: 0.3em !important;
-                    padding-left: 1.2em !important;
-                }
-                
-                ul.level-3 {
-                    list-style-type: square;
-                }
-                
-                ol.level-3 {
-                    list-style-type: lower-roman;
-                }
-                
-                .level-4 {
-                    margin-left: 0.2em !important;
-                    padding-left: 1em !important;
-                }
-                
-                ul.level-4 {
-                    list-style-type: none;
-                }
-                
-                ul.level-4 > li:before {
-                    content: "–";
-                    position: absolute;
-                    left: -0.8em;
-                }
-                
-                ol.level-4 {
-                    list-style-type: decimal;
-                }
-                
-                /* Enhanced table styles */
-                .table-responsive {
-                    margin: 0.75em 0;
-                    width: 100%;
-                }
-                
-                .enhanced-table {
-                    width: 100%;
-                    border-collapse: collapse;
-                    margin-bottom: 1em;
-                }
-                
-                .enhanced-table.has-header thead {
-                    background-color: #f5f5f5;
-                }
-                
-                .enhanced-table.zebra-stripe tr:nth-child(even) {
-                    background-color: #f9f9f9;
-                }
-                
-                .enhanced-table th,
-                .enhanced-table td {
-                    padding: 0.75em;
-                    border: 1px solid #ddd;
-                }
-                
-                .enhanced-table .text-right {
-                    text-align: right;
-                }
-                
-                .enhanced-table .text-center {
-                    text-align: center;
-                }
-                
-                /* Table figure and caption styles */
-                .table-figure {
-                    margin: 2em 0;
-                }
-                
-                .table-figure figcaption {
-                    font-style: italic;
-                    text-align: center;
-                    margin-top: 0.5em;
-                    color: #666;
-                }
-                
-                /* Definition list styles */
-                .definition-list {
-                    margin: 1em 0;
+                /* Typography */
+                body {
+                    font-family: "Roboto", "Helvetica Neue", Helvetica, Arial, sans-serif;
+                    line-height: 1.5;
+                    color: #333;
+                    font-size: 11pt;
+                    margin: 0;
                     padding: 0;
                 }
                 
-                .definition-list .term {
-                    font-weight: bold;
-                    margin-top: 1em;
+                /* Section styling */
+                section {
+                    margin-bottom: 1.5em;
                 }
                 
-                .definition-list .definition {
-                    margin-left: 2em;
+                /* Headings */
+                h1, h2, h3, h4, h5, h6 {
+                    font-family: "Roboto", "Helvetica Neue", Helvetica, Arial, sans-serif;
+                    font-weight: 500;
+                    line-height: 1.2;
+                    margin-top: 1.5em;
+                    margin-bottom: 0.75em;
+                    color: #205493;
+                }
+                
+                h1 {
+                    font-size: 22pt;
+                    color: #112e51;
+                    border-bottom: 2px solid #112e51;
+                    padding-bottom: 0.2em;
+                }
+                
+                h2 {
+                    font-size: 18pt;
+                    border-bottom: 1px solid #205493;
+                    padding-bottom: 0.1em;
+                }
+                
+                h3 {
+                    font-size: 15pt;
+                    color: #323a45;
+                }
+                
+                h4 {
+                    font-size: 13pt;
+                    color: #323a45;
+                }
+                
+                h5, h6 {
+                    font-size: 11pt;
+                    color: #323a45;
+                }
+                
+                /* Cover page styling */
+                .cover-page {
+                    display: flex;
+                    flex-direction: column;
+                    justify-content: center;
+                    height: 297mm; /* A4 height */
+                    width: 210mm; /* A4 width */
+                    text-align: center;
+                    padding: 2cm;
+                }
+                
+                .cover-page h1 {
+                    font-size: 28pt;
+                    text-align: center;
+                    color: #112e51;
+                    border-bottom: none;
+                    margin-bottom: 0.5cm;
+                }
+                
+                .cover-page .subtitle {
+                    font-size: 16pt;
+                    color: #205493;
+                    margin-bottom: 2cm;
+                    font-weight: 300;
+                }
+                
+                .cover-page .report-meta {
+                    margin-top: 2cm;
+                    font-size: 12pt;
+                    color: #5b616b;
+                }
+                
+                /* Table of Contents */
+                .toc {
+                    margin: 2cm 0;
+                    page-break-after: always;
+                }
+                
+                .toc h2 {
+                    font-size: 18pt;
+                    text-align: center;
+                    margin-bottom: 1cm;
+                    border-bottom: none;
+                }
+                
+                .toc ul {
+                    list-style-type: none;
+                    padding-left: 0;
+                }
+                
+                .toc ul ul {
+                    padding-left: 1.5em;
+                }
+                
+                .toc li {
+                    margin-bottom: 0.5em;
+                    padding-bottom: 0.25em;
+                    border-bottom: 1px dotted #aeb0b5;
+                }
+                
+                .toc a {
+                    text-decoration: none;
+                    color: #205493;
+                }
+                
+                /* Links */
+                a {
+                    color: #0071bc;
+                    text-decoration: underline;
+                }
+                
+                /* Lists */
+                ul, ol {
+                    margin-top: 0.5em;
                     margin-bottom: 1em;
+                    padding-left: 2em;
                 }
                 
-                /* Footnote styles */
-                .enhanced-footnotes {
-                    margin-top: 2em;
-                    padding-top: 1em;
-                    border-top: 1px solid #ddd;
+                li {
+                    margin-bottom: 0.25em;
                 }
                 
-                .enhanced-footnotes::before {
-                    content: "Footnotes";
-                    font-weight: bold;
+                /* Tables */
+                table {
+                    width: 100%;
+                    margin: 1em 0;
+                    border-collapse: collapse;
+                    font-size: 10pt;
+                }
+                
+                th {
+                    background-color: #f1f1f1;
+                    font-weight: 600;
+                    text-align: left;
+                    vertical-align: middle;
+                    padding: 0.5em;
+                    border: 1px solid #5b616b;
+                }
+                
+                td {
+                    padding: 0.5em;
+                    border: 1px solid #5b616b;
+                    vertical-align: top;
+                }
+                
+                /* Alternating row colors */
+                tr:nth-child(even) {
+                    background-color: #f9f9f9;
+                }
+                
+                /* Code blocks */
+                pre {
+                    background-color: #f1f1f1;
+                    border: 1px solid #d6d7d9;
+                    border-radius: 3px;
+                    padding: 1em;
+                    font-family: Monaco, Consolas, "Courier New", monospace;
+                    font-size: 9pt;
+                    line-height: 1.4;
+                    overflow-x: auto;
+                    white-space: pre-wrap;
+                    word-wrap: break-word;
+                }
+                
+                code {
+                    font-family: Monaco, Consolas, "Courier New", monospace;
+                    font-size: 90%;
+                    padding: 0.2em 0.4em;
+                    background-color: #f1f1f1;
+                    border-radius: 3px;
+                }
+                
+                /* Blockquotes */
+                blockquote {
+                    margin: 1em 0;
+                    padding: 0.5em 1em;
+                    border-left: 4px solid #205493;
+                    background-color: #f1f1f1;
+                    font-style: italic;
+                }
+                
+                blockquote p:first-child {
+                    margin-top: 0;
+                }
+                
+                blockquote p:last-child {
+                    margin-bottom: 0;
+                }
+                
+                /* Horizontal rule */
+                hr {
+                    border: none;
+                    height: 1px;
+                    background-color: #aeb0b5;
+                    margin: 2em 0;
+                }
+                
+                /* Images */
+                img {
+                    max-width: 100%;
+                    height: auto;
                     display: block;
+                    margin: 1em auto;
+                }
+                
+                /* Figure and captions */
+                figure {
+                    margin: 1.5em 0;
+                    text-align: center;
+                }
+                
+                figcaption {
+                    font-size: 90%;
+                    color: #5b616b;
+                    margin-top: 0.5em;
+                    font-style: italic;
+                }
+                
+                /* Notes and warnings */
+                .note, .warning, .info, .tip {
+                    margin: 1em 0;
+                    padding: 1em;
+                    border-left: 4px solid;
+                    background-color: #f9f9f9;
+                }
+                
+                .note {
+                    border-color: #02bfe7;
+                }
+                
+                .warning {
+                    border-color: #fdb81e;
+                }
+                
+                .info {
+                    border-color: #205493;
+                }
+                
+                .tip {
+                    border-color: #4aa564;
+                }
+                
+                /* Key metrics */
+                .key-metrics {
+                    display: flex;
+                    flex-wrap: wrap;
+                    margin: 1em 0;
+                    justify-content: space-between;
+                }
+                
+                .metric-card {
+                    width: 30%;
                     margin-bottom: 1em;
+                    padding: 1em;
+                    background-color: #f1f1f1;
+                    border-left: 4px solid #205493;
+                }
+                
+                .metric-title {
+                    font-weight: 600;
+                    margin-bottom: 0.5em;
+                    color: #323a45;
+                }
+                
+                .metric-value {
+                    font-size: 18pt;
+                    font-weight: 300;
+                    color: #205493;
+                }
+                
+                /* Category boxes */
+                .category-box {
+                    padding: 1em;
+                    margin: 1em 0;
+                    background-color: #f1f1f1;
+                    border: 1px solid #d6d7d9;
+                    border-radius: 4px;
+                }
+                
+                .category-title {
+                    font-size: 14pt;
+                    font-weight: 500;
+                    color: #205493;
+                    margin-bottom: 0.5em;
+                }
+                
+                /* Footnotes */
+                .footnotes {
+                    margin-top: 2em;
+                    border-top: 1px solid #aeb0b5;
+                    padding-top: 1em;
                 }
                 
                 .footnote-item {
-                    font-size: 0.9em;
-                    color: #666;
+                    font-size: 9pt;
+                    color: #5b616b;
                     margin-bottom: 0.5em;
                 }
                 
                 .footnote-item a {
-                    color: #0066cc;
+                    color: #0071bc;
                     text-decoration: none;
                 }
                 
@@ -879,34 +927,128 @@ class EnhancedPDFGenerator:
                 }
                 
                 /* Utility classes */
-                .text-right { text-align: right; }
-                .text-center { text-align: center; }
+                .text-center {
+                    text-align: center;
+                }
+                
+                .text-right {
+                    text-align: right;
+                }
+                
+                .text-small {
+                    font-size: 90%;
+                }
+                
+                .text-large {
+                    font-size: 110%;
+                }
+                
+                .font-light {
+                    font-weight: 300;
+                }
+                
+                .font-semibold {
+                    font-weight: 600;
+                }
+                
+                .font-bold {
+                    font-weight: 700;
+                }
+                
+                .bg-light {
+                    background-color: #f9f9f9;
+                }
+                
+                .bg-highlight {
+                    background-color: #f1f1f1;
+                }
+                
+                /* Page breaks */
+                .page-break {
+                    page-break-before: always;
+                    break-before: page;
+                }
+                
+                /* Avoid breaking these elements across pages */
+                h1, h2, h3, h4, h5, h6, table, figure, .note, .warning, .info, .tip {
+                    page-break-inside: avoid;
+                }
+                
+                /* Avoid page breaks after headings */
+                h1, h2, h3, h4, h5, h6 {
+                    page-break-after: avoid;
+                }
                 
                 /* Long URL display */
-                a.long-url {
+                .long-url {
                     word-wrap: break-word;
-                    font-size: 0.9em;
-                    color: #7f8c8d;
-                    font-family: monospace;
+                    font-size: 9pt;
+                    color: #5b616b;
+                    font-family: Monaco, Consolas, "Courier New", monospace;
                 }
-            ''', font_config=font_config)
 
+                /* Special sections */
+                .executive-summary {
+                    background-color: #f1f1f1;
+                    padding: 1em;
+                    margin: 1em 0;
+                    border-left: 4px solid #112e51;
+                }
+                
+                /* Report sections */
+                .section-intro {
+                    font-style: italic;
+                    color: #323a45;
+                    margin-bottom: 1em;
+                }
+                
+                /* Section metadata */
+                .section-meta {
+                    margin-bottom: 1em;
+                    font-size: 9pt;
+                    color: #5b616b;
+                }
+                
+                /* Key topics list */
+                .key-topics {
+                    margin: 1em 0;
+                    padding: 0.5em 1em;
+                    background-color: #f1f1f1;
+                    border-left: 2px solid #205493;
+                }
+                
+                .key-topics h4 {
+                    margin-top: 0;
+                    margin-bottom: 0.5em;
+                    color: #205493;
+                }
+                
+                .key-topics ul {
+                    margin: 0;
+                    padding-left: 1.5em;
+                }
+            """
+            
+            # Apply CSS and generate the PDF
+            css = CSS(string=css_string, font_config=font_config)
+            
             html.write_pdf(
                 output_path,
-                stylesheets=[css],  # Apply CSS
-                presentational_hints=True,  # Allow HTML styling attributes
+                stylesheets=[css],
+                presentational_hints=True,
                 font_config=font_config
             )
             print(f"PDF generated successfully: {output_path}")
             return Path(output_path)
+            
         except Exception as e:
-            print(f"Error during WeasyPrint PDF generation: {e}")
-            # Optionally write the final HTML to a file for debugging
+            print(f"Error during PDF generation: {e}")
+            # Save the HTML for debugging
             debug_html_path = Path(output_path).with_suffix('.debug.html')
-            with open(debug_html_path, 'w', encoding='utf-8') as f_debug:
-                f_debug.write(final_html_content)
+            with open(debug_html_path, 'w', encoding='utf-8') as f:
+                f.write(html_content)
             print(f"Debug HTML saved to: {debug_html_path}")
-            raise  # Re-raise the exception
+            raise
 
     def _extract_metadata_and_split_sources(self, raw_content: str) -> Tuple[Dict, str, str]:
         """Extract YAML frontmatter only, keeping content intact.
@@ -942,20 +1084,39 @@ class EnhancedPDFGenerator:
 
         return metadata, main_content, sources_content
 
-def process_markdown_files(base_dir: Path, identifier: str, report_type_name: str, section_order: Optional[List[Tuple[str, str]]] = None, template_path: Optional[str] = None) -> Optional[Path]:
+def process_markdown_files(
+    base_dir: Path, 
+    identifier: str, 
+    report_type_name: str, 
+    section_order: Optional[List[Tuple[str, str]]] = None, 
+    template_path: Optional[str] = None,
+    stages: Optional[List[str]] = None,
+    stage_dirs: Optional[Dict[str, Path]] = None,
+    filtered_vendors: Optional[List[str]] = None,  # Added for product reports
+    deep_dive_vendors: Optional[List[str]] = None  # Added for final product reports
+) -> Optional[Path]:
     """
     Process markdown files based on a given section order and generate a PDF.
-    'identifier' is vendor name or product category.
-    'report_type_name' is used for the PDF filename (e.g., "VendorReport", "ProductReport").
-    'section_order' is the list of (id, title) tuples to determine order and titles.
+    
+    Args:
+        base_dir: The base directory containing markdown and pdf folders
+        identifier: The vendor name or product category
+        report_type_name: Used for the PDF filename (e.g., "VendorReport", "ProductReport")
+        section_order: The list of (id, title) tuples to determine order and titles
+        template_path: Optional custom template path
+        stages: List of stage names to process in order (e.g., ['research', 'analysis', 'final'])
+        stage_dirs: Dictionary mapping stage names to directory paths, if stages are in different locations
+        filtered_vendors: List of filtered vendors for product reports
+        deep_dive_vendors: List of vendors for which deep dives were executed
+        
+    Returns:
+        Path to the generated PDF or None if no sections were found
     """
-    markdown_dir = base_dir / 'markdown'
     pdf_dir = base_dir / 'pdf'
     os.makedirs(pdf_dir, exist_ok=True)
 
     sections = []
-    print(f"Looking for markdown files in: {markdown_dir}")
-
+    
     # Use section_order if provided, otherwise fall back to SECTION_ORDER from config
     if section_order is None:
         section_order = SECTION_ORDER
@@ -965,27 +1126,146 @@ def process_markdown_files(base_dir: Path, identifier: str, report_type_name: st
     if not section_order:
          print("Error: No section order provided or available in config.")
          return None
+    
+    # If no stages specified, use the default single-stage approach with markdown dir in base_dir
+    if not stages:
+        markdown_dirs = [base_dir / 'markdown']
+        print(f"Looking for markdown files in: {markdown_dirs[0]}")
+    else:
+        # Handle multi-stage processing
+        markdown_dirs = []
+        for stage in stages:
+            if stage_dirs and stage in stage_dirs:
+                # Use the provided custom directory for this stage
+                stage_path = stage_dirs[stage]
+                if not stage_path.is_absolute():
+                    stage_path = base_dir / stage_path
+            else:
+                # Default to base_dir/stage_name/markdown
+                stage_path = base_dir / stage / 'markdown'
+            
+            markdown_dirs.append(stage_path)
+            print(f"Looking for {stage} stage markdown files in: {stage_path}")
 
-    for section_id, section_title in section_order:
-        file_path = markdown_dir / f"{section_id}.md"
-        if file_path.exists():
-            try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                if content.strip():
-                    section = PDFSection(
-                        id=section_id,
-                        title=section_title,
-                        content=content
-                    )
-                    sections.append(section)
-                    # print(f"Found and added section: {section_id}") # Debug print
+    # Special handling for vendor deep dives if specified
+    deep_dive_sections = []
+    if deep_dive_vendors and len(deep_dive_vendors) > 0:
+        print(f"Processing deep dives for vendors: {deep_dive_vendors}")
+        
+        # Look for deep dive directories under the base_dir
+        for vendor_name in deep_dive_vendors:
+            # Clean the vendor name for use in directory names
+            clean_vendor_name = re.sub(r'[\\/*?:"<>| ]', "_", vendor_name)
+            
+            # Search for a matching deep dive directory
+            # Pattern: base_dir/VendorResearch_VendorName_timestamp, or custom pattern
+            deep_dive_dir = None
+            
+            # Check potential deep dive directory patterns
+            potential_patterns = [
+                # Common patterns for deep dive directories
+                f"VendorResearch_{clean_vendor_name}_*",  # Standard pattern
+                f"*_{clean_vendor_name}_*",               # Generalized pattern
+                f"*deep*dive*{clean_vendor_name}*",       # Deep dive keyword pattern
+                clean_vendor_name                         # Simple vendor name pattern
+            ]
+            
+            # Find the first matching directory
+            for pattern in potential_patterns:
+                matches = list(base_dir.glob(pattern))
+                for match in matches:
+                    if match.is_dir():
+                        deep_dive_dir = match
+                        break
+                if deep_dive_dir:
+                    break
+                    
+            # If no dedicated directory found, try subdirectories of base_dir
+            if not deep_dive_dir:
+                for subdir in base_dir.iterdir():
+                    if subdir.is_dir() and "deep" in subdir.name.lower():
+                        # Check if this might be a deep dive directory
+                        potential_vendor_dir = subdir / clean_vendor_name
+                        if potential_vendor_dir.exists() and potential_vendor_dir.is_dir():
+                            deep_dive_dir = potential_vendor_dir
+                            break
+            
+            if deep_dive_dir:
+                print(f"Found deep dive directory for {vendor_name}: {deep_dive_dir}")
+                
+                # Look for the markdown directory within the deep dive directory
+                dd_markdown_dir = deep_dive_dir / "markdown"
+                if dd_markdown_dir.exists() and dd_markdown_dir.is_dir():
+                    # Create a section for this vendor's deep dive
+                    dd_section_content = f"# Deep Dive: {vendor_name}\n\n"
+                    
+                    # Process all markdown files in the deep dive directory
+                    dd_files = sorted(list(dd_markdown_dir.glob("*.md")))
+                    for dd_file in dd_files:
+                        # Skip potential system or temporary files
+                        if dd_file.name.startswith('.') or dd_file.name.startswith('~'):
+                            continue
+                            
+                        try:
+                            with open(dd_file, 'r', encoding='utf-8') as f:
+                                section_content = f.read().strip()
+                                if section_content:
+                                    section_title = dd_file.stem.replace('_', ' ').title()
+                                    dd_section_content += f"## {section_title}\n\n{section_content}\n\n"
+                        except Exception as e:
+                            print(f"Error reading deep dive file {dd_file}: {e}")
+                    
+                    # Create a deep dive section for this vendor
+                    if dd_section_content.strip() != f"# Deep Dive: {vendor_name}":  # Check if we added content
+                        deep_dive_sections.append(PDFSection(
+                            id=f"deep_dive_{clean_vendor_name}",
+                            title=f"Deep Dive: {vendor_name}",
+                            content=dd_section_content
+                        ))
+                    else:
+                        print(f"No content found in deep dive markdown files for {vendor_name}")
                 else:
-                    print(f"Skipping empty section file: {file_path.name}")
-            except Exception as e:
-                 print(f"Error reading section file {file_path}: {e}")
+                    print(f"No markdown directory found in deep dive directory for {vendor_name}: {deep_dive_dir}")
+            else:
+                print(f"Could not find deep dive directory for vendor: {vendor_name}")
+
+    # Process each section from the main section order
+    for section_id, section_title in section_order:
+        # Special handling for vendor deep dives section
+        if section_id == "vendor_deep_dives" and deep_dive_sections:
+            # Add all deep dive sections in place of the placeholder
+            for dd_section in deep_dive_sections:
+                sections.append(dd_section)
+            print(f"Added {len(deep_dive_sections)} deep dive sections")
+            continue
+            
+        section_content = None
+        source_dir = None
+        
+        # Look for the section file in each directory, prioritizing later stages
+        for markdown_dir in markdown_dirs:
+            file_path = markdown_dir / f"{section_id}.md"
+            if file_path.exists():
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    if content.strip():
+                        section_content = content
+                        source_dir = markdown_dir
+                        print(f"Found section {section_id} in {markdown_dir}")
+                except Exception as e:
+                    print(f"Error reading section file {file_path}: {e}")
+        
+        # Add the section if we found content for it
+        if section_content:
+            section = PDFSection(
+                id=section_id,
+                title=section_title,
+                content=section_content
+            )
+            sections.append(section)
         else:
-             print(f"Section file not found, skipping: {file_path.name}")
+            print(f"Section file not found in any directory, skipping: {section_id}.md")
 
     if not sections:
         print("No non-empty markdown sections found to generate PDF.")
@@ -994,7 +1274,14 @@ def process_markdown_files(base_dir: Path, identifier: str, report_type_name: st
     pdf_generator = EnhancedPDFGenerator(template_path)
     # Sanitize identifier for filename
     safe_identifier = re.sub(r'[\\/*?:"<>| ]', "_", identifier)
-    output_filename = f"{safe_identifier}_{report_type_name}.pdf"
+    
+    # Add stage information to filename if using stages
+    if stages:
+        stage_suffix = f"_{'-'.join(stages)}"
+    else:
+        stage_suffix = ""
+        
+    output_filename = f"{safe_identifier}{stage_suffix}_{report_type_name}.pdf"
     output_path = pdf_dir / output_filename
 
     # Pass necessary metadata for the template
@@ -1002,7 +1289,10 @@ def process_markdown_files(base_dir: Path, identifier: str, report_type_name: st
         'title': f"{identifier} - {report_type_name}",
         'identifier': identifier, # Pass the vendor/product name
         'language': 'English', # Hardcoded for now
-        'report_type': report_type_name
+        'report_type': report_type_name,
+        'stages': stages if stages else None,
+        'filtered_vendors': filtered_vendors if filtered_vendors else None,
+        'deep_dive_vendors': deep_dive_vendors if deep_dive_vendors else None
         # Add other metadata if needed by the template
     }
 

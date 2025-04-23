@@ -1,7 +1,8 @@
 # vendor_prompts.py
 
 import textwrap
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List  # Added List
+import json  # Import json for parsing example
 
 # --- Adapted Base Instruction Blocks for Vendor Research ---
 
@@ -1031,5 +1032,65 @@ def get_vendor_suitability_summary_prompt(identifier: str, language: str, contex
 
 {instructions['final_review']}
 {instructions['final_source_list']}
+"""
+    return prompt
+
+# --- New Prompt for Phase 5: Vendor Dashboard Summary ---
+
+def get_vendor_dashboard_summary_prompt(full_report_content: str) -> str:
+    """
+    Generates a prompt to extract key dashboard KPIs from a completed vendor report.
+    """
+    # Basic instruction block (doesn't need all the formatting rules)
+    prompt = f"""
+**Objective:** Analyze the provided Vendor Research Report Markdown content and extract specific Key Performance Indicators (KPIs) for a dashboard summary. Output the results ONLY as a valid JSON object.
+
+**Input Report Content:**
+```markdown
+{full_report_content}
+```
+
+Instructions:
+
+Read Carefully: Process the entire report content.
+
+Extract Specific KPIs: Identify and extract the following information precisely:
+
+financial_stability_assessment: The overall assessment ("Low", "Moderate", or "High") from the "Financial Stability Summary & Risk Assessment" section (or section 10.1/10.6).
+
+operational_risk_assessment: The overall assessment ("Low", "Moderate", or "High") from the "Operational Risk Summary" section (or section 10.2/10.6).
+
+compliance_risk_assessment: The overall assessment ("Low", "Moderate", or "High") from the "Compliance & Regulatory Risk Summary" section (or section 10.3/10.6).
+
+key_compliance_checks: A JSON object mapping specific common certifications to their status found in the report (usually Section 5.1 table). Use "Yes" if certified/compliant, "No" if explicitly mentioned as missing, or "Not Mentioned" otherwise. Check for "ISO 9001", "ISO 27001", "SOC 2". Example: {{"ISO 9001": "Yes", "ISO 27001": "Not Mentioned", "SOC 2": "No"}}
+
+top_3_risks: A JSON array containing the 3 most significant specific risk factors mentioned across the risk assessment sections (Financial, Operational, Compliance, Security, Reputational - Section 10). Summarize each risk concisely (max 15 words per risk). Example: ["High debt-to-equity ratio", "Single manufacturing site concentration", "Lack of SOC 2 compliance"]
+
+overall_suitability: A concise recommendation category based on the "Vendor Suitability Summary" (Section 11). Choose one: "Recommended", "Consider with Caution", "Not Recommended".
+
+Handle Missing Data: If a specific piece of information cannot be clearly determined from the text (e.g., an assessment level isn't explicitly stated), use null as the value for that key in the JSON output. For key_compliance_checks, use "Not Mentioned" if the certification isn't discussed. For top_3_risks, provide fewer than 3 if fewer are clearly identifiable as major. If suitability isn't clear, use null.
+
+Output Format: Respond ONLY with a single, valid JSON object containing these keys and their extracted values. Do not include any introductory text, explanations, markdown formatting, or code fences around the JSON.
+
+Example JSON Output Structure:
+
+{{
+  "financial_stability_assessment": "Moderate",
+  "operational_risk_assessment": "High",
+  "compliance_risk_assessment": "Low",
+  "key_compliance_checks": {{
+    "ISO 9001": "Yes",
+    "ISO 27001": "Yes",
+    "SOC 2": "Not Mentioned"
+  }},
+  "top_3_risks": [
+    "High geographic concentration of facilities",
+    "Declining operating margins over 3 years",
+    "Dependency on single upstream supplier for component X"
+  ],
+  "overall_suitability": "Consider with Caution"
+}}
+
+JSON Output:
 """
     return prompt

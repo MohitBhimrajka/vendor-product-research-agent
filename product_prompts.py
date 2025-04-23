@@ -2,6 +2,7 @@
 
 import textwrap
 from typing import Optional, Dict, Any, List
+import json # Import json for parsing example
 
 # --- Adapted Base Instruction Blocks for Product Research ---
 
@@ -425,59 +426,67 @@ def get_product_compliance_landscape_prompt(identifier: str, language: str, cont
 
 
 def get_product_vendor_identification_prompt(identifier: str, language: str, context_company_name: str, **optional_inputs) -> str:
-    """Prompt to identify potential vendors for the product category."""
-    region_focus = optional_inputs.get('region')
-    focus_instruction = f"Consider vendors with a known presence or focus in: **'{region_focus}'** if possible, alongside global leaders." if region_focus else "Identify globally recognized and potentially significant regional vendors."
-
-    # (Include all formatted base instructions here)
-    formatted_additional_instructions = PRODUCT_ADDITIONAL_REFINED_INSTRUCTIONS.format(identifier=identifier, context_company_name=context_company_name)
-    formatted_research_depth = PRODUCT_RESEARCH_DEPTH_INSTRUCTION.format(identifier=identifier, context_company_name=context_company_name)
-    formatted_handling_missing = PRODUCT_HANDLING_MISSING_INFO_INSTRUCTION.format(identifier=identifier)
-    formatted_analysis_synthesis = PRODUCT_ANALYSIS_SYNTHESIS_INSTRUCTION.format(identifier=identifier, context_company_name=context_company_name)
-    formatted_inline_citation = PRODUCT_INLINE_CITATION_INSTRUCTION.format(identifier=identifier)
-    formatted_specificity = PRODUCT_SPECIFICITY_INSTRUCTION.format(identifier=identifier)
-    formatted_audience_reminder = PRODUCT_AUDIENCE_CONTEXT_REMINDER.format(identifier=identifier, context_company_name=context_company_name)
-    formatted_base_formatting = PRODUCT_BASE_FORMATTING_INSTRUCTIONS.format(identifier=identifier, context_company_name=context_company_name)
-    formatted_final_review = PRODUCT_FINAL_REVIEW_INSTRUCTION.format(identifier=identifier, context_company_name=context_company_name)
-    formatted_final_source_list = PRODUCT_FINAL_SOURCE_LIST_INSTRUCTIONS.format(identifier=identifier)
-
+    """
+    Generate a prompt for identifying key vendors/providers in a product category.
+    
+    Args:
+        identifier: The product category name
+        language: The language to use
+        context_company_name: Company context name
+        optional_inputs: Additional context variables
+        
+    Returns:
+        Prompt for vendor identification
+    """
+    instructions = _format_product_instructions(identifier, context_company_name)
+    
+    # Add info from optional inputs if available
+    region_context = ""
+    if 'region' in optional_inputs and optional_inputs['region']:
+        region_context = f"Focus primarily on vendors that serve the {optional_inputs['region']} region, but include major global providers if highly relevant."
+    
+    cert_context = ""
+    if 'required_certs' in optional_inputs and optional_inputs['required_certs']:
+        cert_context = f"Pay particular attention to vendors that are likely to meet these compliance requirements: {optional_inputs['required_certs']}."
+    
     prompt = f"""
-**CRITICAL FOCUS:** Identify vendors offering solutions in the product category: **'{identifier}'**.
+{instructions['base_formatting']}
 
-**Objective:** Identify a list of significant vendors (aim for 5-10 if possible, but prioritize accuracy) that offer products or services within the '{identifier}' category, based on grounded sources. {focus_instruction}
+## 5. Vendor Identification and Landscape
 
-**Target Audience:** {formatted_audience_reminder}
+**Research Task:** Identify and analyze the major vendors/providers in the **{identifier}** market.
 
-**Output Language:** English
+**Expected Output:**
 
-**Research Requirements:** Use grounded sources like analyst reports (e.g., Gartner MQ, Forrester Wave vendor lists), reputable market share reports, industry directories, competitor lists mentioned by known players. Ground every identified vendor with [SSX]. Provide full official vendor names.
-{formatted_handling_missing}
-{formatted_research_depth}
-{formatted_specificity}
-{formatted_inline_citation}
-{formatted_additional_instructions}
+1. Identify 10-15 significant vendors in the **{identifier}** space based on market share, reputation, and relevance.
+2. Include a mix of established players and noteworthy emerging vendors when relevant.
+3. For each identified vendor, provide a brief (1-2 sentences) description of their market positioning or key differentiator in the **{identifier}** space.
+4. Comment on the general competitive landscape (e.g., highly consolidated vs. fragmented, regional variations, rapid change vs. stable).
+5. Note any vendors with particularly strong positions in specific segments of the market.
 
-{formatted_base_formatting}
+{region_context}
+{cert_context}
 
-## 5. Preliminary Vendor Identification: {identifier}
+**IMPORTANT OUTPUT FORMAT:** After completing your full analysis, include a machine-readable list of ONLY the vendor names (without descriptions) following this exact format:
 
-### 5.1 Identified Vendors
-    *   List the vendors identified as key players or significant providers in the '{identifier}' market. Present in a **perfectly formatted Markdown table**. Include Vendor Name, a brief note on their relevance/specialty within '{identifier}' if known, and the source(s) confirming their participation in this market.
-        | Vendor Name                  | Relevance/Specialty in '{identifier}' (Brief Note) | Source(s) Identifying Vendor |
-        |------------------------------|----------------------------------------------------|------------------------------|
-        | [Vendor A Full Name]         | Market Leader / Broad Suite Provider               | [SSX], [SSY]                 |
-        | [Vendor B Full Name]         | Specialist in Sub-Category X / Niche Player        | [SSZ]                        |
-        | [Vendor C Full Name]         | Strong presence in '{region_focus or 'Region Y'}'          | [SSW]                        |
-        | [Vendor D Full Name]         | Known for Innovation / Specific Technology         | [SSX], [SSV]                 |
-        | ... (Aim for 5-10 verified)  | ...                                                | ...                          |
-    *   Ensure vendor names are the official legal names where possible [SSX].
+```
+VENDOR_LIST_START
+- Vendor Name 1
+- Vendor Name 2
+- Vendor Name 3
+...
+VENDOR_LIST_END
+```
 
-### 5.2 Notes on Vendor Landscape
-    *   Briefly comment on the apparent concentration of the vendor landscape (e.g., dominated by a few large players, fragmented with many niche vendors) based on the findings [SSX].
-    *   Mention any major vendor categories observed (e.g., large suite providers vs. best-of-breed specialists) [SSY].
+This structured format is CRITICAL for automated processing. The list must appear somewhere in your response, exactly as shown, with each vendor on a separate line preceded by "- " (dash and space).
 
-{formatted_final_review}
-{formatted_final_source_list}
+{instructions['inline_citation']}
+
+{instructions['research_depth']}
+
+{instructions['handling_missing']}
+
+{instructions['final_source_list']}
 """
     return prompt
 
@@ -564,9 +573,16 @@ def get_filtered_vendor_list_prompt(
 1.  **Interpret User Needs:** Carefully read the user's answers. Identify the key criteria, priorities, constraints, or preferences expressed (e.g., "must have strong AI features", "needs to support enterprise scale", "requires SOC 2 compliance", "prefers vendors with local support in Germany", "looking for cost-effective options").
 2.  **Evaluate Initial Vendors (Conceptual):** Based *only* on general knowledge commonly associated with the vendors in the Initial List and the product category '{product_category}', assess how well each vendor might align with the user's interpreted needs. (You don't have deep vendor data here, rely on common associations - e.g., Salesforce is enterprise-focused, HubSpot often targets SMBs, certain vendors are known for specific features).
 3.  **Filter the List:** Select the vendors from the **Initial Vendor List** that appear to be the *strongest potential matches* based on the user's answers. Prioritize vendors explicitly fitting key requirements.
-4.  **Output Format:** Provide *only* the filtered list of vendor names, one name per line. Do NOT include any explanation, introductory text, or justifications. Just the names that remain after filtering. If no vendors seem like a strong match, output the text "NO_MATCHING_VENDORS".
+4.  **Output Format:** Provide the filtered list of vendor names using the structured format below. If no vendors match, output only "NO_MATCHING_VENDORS".
 
-**Filtered Vendor List (One vendor name per line):**
+FILTERED_VENDORS_START
+[Vendor Name 1]
+[Vendor Name 2]
+[Vendor Name 3]
+...
+FILTERED_VENDORS_END
+
+Important: Use the exact names from the initial vendor list. Do not add any explanation or other text outside the FILTERED_VENDORS_START and FILTERED_VENDORS_END markers.
 """
     return prompt
 
@@ -574,14 +590,345 @@ def get_filtered_vendor_list_prompt(
 # --- Prompts for Phase 4 onwards (Vendor Profiles, Comparison, Relevance etc.) ---
 # --- These will be defined in Phase 4 ---
 
-# Placeholder for profile prompt
-def get_vendor_light_profiles_prompt(identifier: str, language: str, context_company_name: str, **optional_inputs) -> str:
-     return f"Placeholder prompt for generating light profiles for vendors in category '{identifier}'."
+# Helper to format base instructions for product prompts
+def _format_product_instructions(identifier: str, context_company_name: str) -> Dict[str, str]:
+    """Formats all base instruction blocks for product context."""
+    # Reuse the base instruction variables defined earlier in this file
+    return {
+        "additional_refined": PRODUCT_ADDITIONAL_REFINED_INSTRUCTIONS.format(identifier=identifier, context_company_name=context_company_name),
+        "research_depth": PRODUCT_RESEARCH_DEPTH_INSTRUCTION.format(identifier=identifier, context_company_name=context_company_name),
+        "handling_missing": PRODUCT_HANDLING_MISSING_INFO_INSTRUCTION.format(identifier=identifier),
+        "analysis_synthesis": PRODUCT_ANALYSIS_SYNTHESIS_INSTRUCTION.format(identifier=identifier, context_company_name=context_company_name),
+        "inline_citation": PRODUCT_INLINE_CITATION_INSTRUCTION.format(identifier=identifier),
+        "specificity": PRODUCT_SPECIFICITY_INSTRUCTION.format(identifier=identifier),
+        "audience_reminder": PRODUCT_AUDIENCE_CONTEXT_REMINDER.format(identifier=identifier, context_company_name=context_company_name),
+        "base_formatting": PRODUCT_BASE_FORMATTING_INSTRUCTIONS.format(identifier=identifier, context_company_name=context_company_name),
+        "final_review": PRODUCT_FINAL_REVIEW_INSTRUCTION.format(identifier=identifier, context_company_name=context_company_name),
+        "final_source_list": PRODUCT_FINAL_SOURCE_LIST_INSTRUCTIONS.format(identifier=identifier)
+    }
 
-# Placeholder for comparison prompt
-def get_vendor_comparison_matrix_prompt(identifier: str, language: str, context_company_name: str, **optional_inputs) -> str:
-     return f"Placeholder prompt for generating comparison matrix for vendors in category '{identifier}'."
 
-# Placeholder for relevance prompt
-def get_product_relevance_prompt(identifier: str, language: str, context_company_name: str, **optional_inputs) -> str:
-     return f"Placeholder prompt for analyzing relevance of '{identifier}' for {context_company_name}."
+# --- New Prompts for Phase 4 ---
+
+def get_vendor_light_profile_prompt(
+    vendor_name: str, # Specific vendor for this profile
+    product_category: str,
+    language: str,
+    context_company_name: str,
+    **optional_inputs
+    ) -> str:
+    """
+    Generates a prompt for a CONCISE profile of a SINGLE vendor,
+    focusing on aspects relevant to the product category.
+    This reuses VENDOR base instructions for vendor-specific details.
+    """
+    # Use VENDOR instructions for vendor-specific grounding/formatting rules
+    import vendor_prompts # Import needed for _format_all_instructions
+    instructions = vendor_prompts._format_all_instructions(vendor_name, context_company_name)
+    required_certs = optional_inputs.get('required_certs')
+    certs_focus = f"Highlight status for certifications like '{required_certs}' if found." if required_certs else ""
+
+    prompt = f"""
+**CRITICAL FOCUS:** Generate a CONCISE profile for the specific vendor: **'{vendor_name}'**, focusing on their relevance to the product category **'{product_category}'**.
+
+**Objective:** Provide a brief summary (2-3 paragraphs MAX, plus key bullet points/table) covering the vendor's core offering in '{product_category}', key strengths/weaknesses as a supplier for this category, notable compliance points, and basic company info. AVOID deep financial/operational analysis here - focus on relevance to the product.
+
+**Target Audience:** {instructions['audience_reminder']} (Quick vendor snapshot for comparison)
+
+**Output Language:** English
+
+**Research Requirements:** Use vendor's official website (product pages, about us, compliance), grounded summaries. Ground claims with [SSX]. Be concise.
+{instructions['handling_missing']}
+{instructions['research_depth']} # Focus on product pages, compliance summaries
+{instructions['specificity']} # Official vendor/product names
+{instructions['inline_citation']}
+{instructions['additional_refined']} # For vendor-specific details
+
+{instructions['base_formatting']} # For structure
+
+### Vendor Profile: {vendor_name} (Relevance to: {product_category})
+
+*   **Core Offering in '{product_category}':** Briefly describe their main product/service in this specific category. What is their flagship offering called? [SSX]
+*   **Key Strengths (for this category):** List 2-3 key strengths *as a supplier for {product_category}* (e.g., specific relevant feature, strong industry focus, key technology). Use bullet points [SSY].
+*   **Potential Weaknesses/Gaps (for this category):** List 1-2 potential weaknesses *relevant to {product_category}* (e.g., missing a key feature common in the market, less experience in {context_company_name}'s industry compared to others) based on available info [SSZ].
+*   **Compliance Highlights:**
+    *   ISO 9001 Status: [Certified/Not Mentioned] [SSX]
+    *   ISO 27001/SOC 2 Status: [Certified/Report Available/Not Mentioned] [SSY]
+    *   {required_certs or 'Other Key Cert'}: [Status if found] [SSZ] {certs_focus}
+*   **Basic Info:**
+    *   Approx. Employee Size/Revenue Range (if easily found): [e.g., 500-1000 employees, ~$100M Revenue] [SSW]
+    *   Headquarters Location: [City, Country] [SSV]
+    *   Ownership Type: [Public/Private/Subsidiary] [SSU]
+
+*   **Brief Summary Paragraph:** A concise 2-3 sentence overall summary of this vendor's apparent positioning and key characteristics for the '{product_category}' market based on the above points.
+
+{instructions['final_review']}
+{instructions['final_source_list']}
+"""
+    return prompt
+
+
+def get_vendor_comparison_matrix_prompt(
+    product_category: str,
+    filtered_vendors: List[str],
+    comparison_criteria: List[str], # Criteria selected by user/defined
+    language: str,
+    context_company_name: str,
+    **optional_inputs
+    ) -> str:
+    """
+    Generates a prompt to create a comparison matrix for the filtered vendors.
+    """
+    # Use PRODUCT instructions for market/feature context
+    instructions = _format_product_instructions(product_category, context_company_name)
+    vendor_list_str = "\n".join([f"- {v}" for v in filtered_vendors])
+    criteria_str = "\n".join([f"- {c}" for c in comparison_criteria])
+
+    prompt = f"""
+**CRITICAL FOCUS:** Compare the specified vendors for the product category **'{product_category}'** based on the given criteria.
+
+**Objective:** Create a **perfectly formatted Markdown table** comparing the vendors listed below across the specified criteria. Base the comparison *only* on publicly available, verifiable information obtained from grounded sources for each vendor. Use concise descriptions or ratings (e.g., Yes/No, High/Med/Low, specific feature names) in the table cells.
+
+**Vendors to Compare:**
+{vendor_list_str}
+
+**Criteria for Comparison:**
+{criteria_str}
+
+**Target Audience:** {instructions['audience_reminder']} (Needs clear side-by-side comparison)
+
+**Output Language:** English
+
+**Research Requirements:** For each vendor and criterion, perform targeted searches using official vendor websites, product documentation, compliance pages, and grounded summaries. Ground each data point within the table using [SSX]. If information for a specific cell cannot be found after exhaustive search, use '-'. Be objective.
+{instructions['handling_missing']}
+{instructions['research_depth']} # Targeted search per vendor/criterion
+{instructions['specificity']} # Use consistent terms for comparison
+{instructions['inline_citation']} # Essential for table cells
+{instructions['additional_refined']} # Ensure data accuracy per vendor
+
+{instructions['base_formatting']} # CRITICAL for table format
+
+## Vendor Comparison Matrix: {product_category}
+"""
+    # Dynamically build the header row
+    header_vendors = " | ".join(filtered_vendors) if filtered_vendors else "Vendor A | Vendor B | Vendor C" # Placeholder if no vendors
+    table_header = f"| Feature/Criterion | {header_vendors} | Source(s) Summary |\n"
+    table_separator = f"|---------------------|{'|'.join(['-' * len(v) for v in filtered_vendors]) if filtered_vendors else '----------|----------|----------'}|-------------------|\n" # Adjust separator length
+    
+    # Add rows for each criterion dynamically
+    table_body = ""
+    for criterion in comparison_criteria:
+        # Placeholder cells - LLM needs to fill these with grounded data [SSX]
+        cells = " | ".join(['[Fill Data/Status] [SSX]' for _ in filtered_vendors]) if filtered_vendors else " - | - | - "
+        table_body += f"| {criterion.ljust(25)} | {cells} | [List main sources, e.g., SS1, SS5, SS9] |\n" # Adjust padding
+
+    prompt += table_header + table_separator + table_body + "\n" # Add final newline for spacing
+    prompt += f"""
+*Note: Use concise terms in cells (e.g., 'Yes', 'No', 'Partial', 'High', 'Low', specific version/feature name). Cite source(s) for each vendor's data point within or immediately after the cell content.*
+
+{instructions['final_review']}
+{instructions['final_source_list']}
+"""
+    return prompt
+
+
+def get_product_relevance_prompt(
+    product_category: str,
+    market_summary: str, # Summary of market/features/compliance from initial run
+    filtered_vendors: List[str],
+    comparison_summary: str, # Summary of comparison results (or the matrix itself)
+    language: str,
+    context_company_name: str,
+    **optional_inputs
+    ) -> str:
+    """
+    Generates prompt to analyze relevance for the context company.
+    """
+    # Use PRODUCT instructions, but with context company focus
+    instructions = _format_product_instructions(product_category, context_company_name)
+
+    prompt = f"""
+**CRITICAL FOCUS:** Analyze the relevance and potential fit of the **'{product_category}'** market and the leading/filtered vendors for the specific needs of **'{context_company_name}'**.
+
+**Objective:** Based on the provided market analysis, feature landscape, compliance overview, and vendor comparison for '{product_category}', evaluate how well this product category and the top vendors align with the likely needs, priorities, and context of '{context_company_name}'.
+
+**Provided Context:**
+*   **Product Category:** {product_category}
+*   **Requesting Company:** {context_company_name}
+*   **Market/Feature/Compliance Summary:** {market_summary}
+*   **Filtered Vendors:** {', '.join(filtered_vendors) if filtered_vendors else 'None specified/filtered'}
+*   **Comparison Summary/Matrix:** {comparison_summary}
+*   **Optional User Input:** Region: {optional_inputs.get('region', 'N/A')}, Required Certs: {optional_inputs.get('required_certs', 'N/A')}
+
+**Target Audience:** {instructions['audience_reminder']} (Focus on fit for *us*)
+
+**Output Language:** English
+
+**Research Requirements:** This section primarily involves **analysis and synthesis** of the previously generated information. Use inline citations [SSX] to refer back to specific points made in the market overview, feature analysis, compliance landscape, or vendor comparison sections. Perform minimal *new* searches unless needed to clarify a specific point about '{context_company_name}'s likely context (if possible and grounded).
+{instructions['handling_missing']}
+{instructions['research_depth']} # Primarily synthesizing prior findings
+{instructions['specificity']} # Connect specific features/trends to context company
+{instructions['inline_citation']} # Reference previous sections' findings
+{instructions['analysis_synthesis']} # CRITICAL for this section
+{instructions['additional_refined']}
+
+{instructions['base_formatting']}
+
+## Relevance & Fit Analysis for {context_company_name}
+
+### Relevance of '{product_category}' Market Trends
+    *   Analyze how the key market drivers and trends identified for '{product_category}' [cite Sec 2 findings, e.g., SSX from Sec2] are relevant (or irrelevant) to '{context_company_name}'. Consider '{context_company_name}'s industry and likely strategic priorities.
+    *   Discuss potential opportunities or threats these trends present specifically for '{context_company_name}' regarding this product category [cite Sec 2 findings].
+
+### Fit of Key Features & Technologies
+    *   Evaluate which of the common or differentiating features/technologies identified for '{product_category}' [cite Sec 3 findings, e.g., SSY from Sec3] are likely most important or beneficial for '{context_company_name}'s potential use cases. Justify the assessment.
+    *   Identify any potential feature gaps or required integrations that '{context_company_name}' might need to consider [cite Sec 3 findings].
+
+### Alignment with Compliance & Regional Needs
+    *   Assess the importance of the identified compliance standards or certifications [cite Sec 4 findings, e.g., SSZ from Sec4] for '{context_company_name}', considering its industry and operational footprint. Does the general landscape meet the specified requirements ('{optional_inputs.get('required_certs', 'N/A')}')?
+    *   Comment on the suitability of the vendor landscape considering the specified geographic region ('{optional_inputs.get('region', 'N/A')}') based on vendor presence noted earlier [cite Sec 5/Comparison findings].
+
+### Vendor Suitability Context for '{context_company_name}'
+    *   Based on the vendor comparison [cite Comparison Matrix/Summary], which of the filtered vendors seem like the strongest potential fit specifically for '{context_company_name}'s likely profile (e.g., considering scale, industry focus, specific feature needs identified above)? Briefly justify why.
+    *   Highlight any major risks or trade-offs '{context_company_name}' should consider when evaluating these specific vendors [cite Sec 10 findings if deep dives done, or Comparison/Light Profile findings].
+
+{instructions['final_review']}
+{instructions['final_source_list']}
+"""
+    return prompt
+
+
+def get_product_recommendations_prompt(
+    product_category: str,
+    analysis_summary: str, # Combined summary of market, features, vendors, relevance
+    language: str,
+    context_company_name: str,
+    **optional_inputs
+    ) -> str:
+    """
+    Generates prompt for outlook and recommendations tailored to context company.
+    """
+    instructions = _format_product_instructions(product_category, context_company_name)
+
+    prompt = f"""
+**CRITICAL FOCUS:** Provide a future outlook and actionable recommendations regarding the **'{product_category}'** market specifically for **'{context_company_name}'**.
+
+**Objective:** Based on the comprehensive analysis performed (market trends, features, compliance, vendor landscape, relevance analysis), provide a forward-looking perspective and concrete recommendations for '{context_company_name}'.
+
+**Provided Context:**
+*   **Product Category:** {product_category}
+*   **Requesting Company:** {context_company_name}
+*   **Analysis Summary (Market, Features, Vendors, Relevance):** {analysis_summary}
+*   **Optional User Input:** Region: {optional_inputs.get('region', 'N/A')}, Required Certs: {optional_inputs.get('required_certs', 'N/A')}
+
+**Target Audience:** {instructions['audience_reminder']} (Needs actionable advice)
+
+**Output Language:** English
+
+**Research Requirements:** This section is primarily **analytical and advisory**, based on synthesizing previous findings. Use citations [SSX] to refer back to specific data points supporting the outlook or recommendations.
+{instructions['handling_missing']}
+{instructions['research_depth']} # Synthesize prior findings
+{instructions['specificity']} # Actionable recommendations
+{instructions['inline_citation']} # Reference evidence for outlook/recommendations
+{instructions['analysis_synthesis']} # CRITICAL for outlook and recommendations
+{instructions['additional_refined']}
+
+{instructions['base_formatting']}
+
+## Outlook & Recommendations for {context_company_name}
+
+### Future Market Outlook (for '{product_category}')
+    *   Summarize the likely future trajectory of the '{product_category}' market over the next 2-3 years, considering the trends identified [cite Sec 2 findings, e.g., SSX from Sec2].
+    *   Highlight key technological advancements or market shifts expected to impact vendor offerings and user adoption [cite Sec 2/3 findings].
+    *   Discuss potential long-term implications for companies like '{context_company_name}' that adopt or rely on this product category.
+
+### Strategic Recommendations for '{context_company_name}'
+    *   Provide 3-5 concrete, actionable recommendations for '{context_company_name}' regarding its strategy for '{product_category}'. Base these recommendations *directly* on the analysis findings (use bullet points):
+        *   e.g., **Prioritize Vendors:** "Recommend focusing further evaluation efforts on Vendor A and Vendor C based on their strong feature alignment [cite Sec X findings] and compliance status [cite Sec Y findings]."
+        *   e.g., **Address Specific Risks:** "Ensure thorough due diligence on Vendor B's financial stability given the concerns raised [cite Sec Z findings]."
+        *   e.g., **Define Integration Strategy:** "Develop a clear integration plan, as connecting '{product_category}' solutions with existing System ABC appears to be a common challenge [cite Sec W findings]."
+        *   e.g., **Consider Phased Adoption:** "Given the market volatility [cite Sec V findings], recommend a phased adoption approach starting with Department XYZ."
+        *   e.g., **Negotiate Key Terms:** "Focus contract negotiations on [e.g., specific SLA guarantees, data residency clauses] based on identified compliance needs [cite Sec U findings]."
+        *   e.g., **Monitor Market:** "Continuously monitor [e.g., specific emerging technology] as it may significantly disrupt the vendor landscape within 1-2 years [cite Sec T findings]."
+
+### Suggested Next Steps
+    *   Outline logical next steps for '{context_company_name}'s internal team (e.g., Procurement, IT) based on the recommendations:
+        *   e.g., Initiate RFI/RFP process with shortlisted vendors (Vendor A, C).
+        *   e.g., Conduct technical proof-of-concept (PoC) focusing on [specific feature/integration].
+        *   e.g., Schedule vendor demonstrations and reference calls.
+        *   e.g., Perform deeper dive / trigger full vendor research for shortlisted candidates.
+        *   e.g., Re-evaluate internal requirements based on market findings.
+
+{instructions['final_review']}
+{instructions['final_source_list']}
+"""
+    return prompt
+
+
+# --- New Prompt for Phase 5: Product Dashboard Summary ---
+
+def get_product_dashboard_summary_prompt(full_report_content: str, filtered_vendor_list: Optional[List[str]] = None) -> str:
+    """
+    Generates a prompt to extract key dashboard KPIs from a completed product report.
+    filtered_vendor_list is provided separately as it comes from state, not just the markdown.
+    """
+    vendor_count_note = f"The final filtered vendor list contains {len(filtered_vendor_list)} vendors: {', '.join(filtered_vendor_list)}." if filtered_vendor_list else "No vendors were selected after filtering."
+
+    prompt = f"""
+**Objective:** Analyze the provided Product Research Report Markdown content and extract specific Key Performance Indicators (KPIs) for a dashboard summary. Output the results ONLY as a valid JSON object.
+
+**Input Report Content:**
+```markdown
+{full_report_content}
+```
+
+Additional Context:
+{vendor_count_note}
+
+Instructions:
+
+Read Carefully: Process the entire report content, paying attention to market overview, features, compliance, and vendor identification/comparison sections.
+
+Extract Specific KPIs: Identify and extract the following information precisely:
+
+identified_vendor_count: The total number of vendors initially listed in the "Preliminary Vendor Identification" section (Section 5). Parse the table or list.
+
+filtered_vendor_count: The number of vendors in the final filtered list (Use the count provided in the Additional Context above).
+
+market_growth_trend: A concise description of the market trend from the "Market Overview & Trends" section (Section 2). Choose one: "Growing", "Stable", "Declining", or "Mixed/Unclear".
+
+top_3_filtered_vendors: A JSON array containing the names of the first 3 vendors listed in the filtered vendor list provided in the Additional Context. If fewer than 3, list all available. If none, provide an empty array [].
+
+key_tech_trends: A JSON array containing 2-3 key technology trends or prominent features mentioned in the "Key Features & Technologies" or "Market Overview" sections (Section 3 or 2). Summarize concisely (max 10 words per trend). Example: ["Increased AI Integration", "Shift to Cloud/SaaS Models", "Focus on Vertical Solutions"]
+
+common_compliance_standards: A JSON array containing 2-3 key compliance standards or certifications frequently mentioned as relevant in the "Compliance & Certification Landscape" section (Section 4). Example: ["ISO 27001", "SOC 2", "GDPR"]
+
+Handle Missing Data: If a specific piece of information cannot be clearly determined (e.g., market trend is ambiguous), use null or a reasonable default like "Unclear". For lists (top_3_filtered_vendors, key_tech_trends, common_compliance_standards), provide an empty array [] if none can be confidently extracted.
+
+Output Format: Respond ONLY with a single, valid JSON object containing these keys and their extracted values. Do not include any introductory text, explanations, markdown formatting, or code fences around the JSON.
+
+Example JSON Output Structure:
+
+{{
+  "identified_vendor_count": 8,
+  "filtered_vendor_count": 3,
+  "market_growth_trend": "Growing",
+  "top_3_filtered_vendors": [
+    "Vendor A Full Name",
+    "Vendor C Full Name",
+    "Vendor D Full Name"
+  ],
+  "key_tech_trends": [
+    "AI-powered features becoming standard",
+    "Strong push towards cloud-native architecture"
+  ],
+  "common_compliance_standards": [
+    "SOC 2 Type II",
+    "ISO 27001",
+    "GDPR (for EU operations)"
+  ]
+}}
+
+JSON Output:
+"""
+    return prompt
