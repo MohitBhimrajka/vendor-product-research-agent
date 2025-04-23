@@ -473,9 +473,11 @@ with st.sidebar:
                 }
                 if research_mode == "Product Research":
                     st.session_state.optional_inputs_storage['product_identifier'] = identifier_value
+                    st.session_state.product_identifier = identifier_value
                     st.session_state.current_task = "generating_product_initial"  # Set task state
                 else:  # Vendor Research mode
                     st.session_state.optional_inputs_storage['vendor_identifier'] = identifier_value
+                    st.session_state.vendor_name = identifier_value
                     st.session_state.current_task = "generating_vendor_report"  # Set task state
                     
                 # Now set the generation flag and rerun
