@@ -9,7 +9,7 @@ load_dotenv()
 
 # --- LLM Configuration ---
 LLM_MODEL = os.getenv('LLM_MODEL', 'gemini-2.5-pro-preview-03-25')
-LLM_TEMPERATURE = float(os.getenv('LLM_TEMPERATURE', '0.63'))
+LLM_TEMPERATURE = float(os.getenv('LLM_TEMPERATURE', '0.8'))
 
 # --- PDF Generation Configuration ---
 PDF_CONFIG = { # ... (keep existing config) ...

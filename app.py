@@ -498,7 +498,8 @@ if st.session_state.current_task in ["generating_vendor_report", "generating_pro
     try:
         success = False
         with st.spinner("Running report generation..."):
-            time.sleep(0.5) # Short delay for UI feedback
+            # Remove delay to maximize throughput
+            # time.sleep(0.5) # Short delay for UI feedback
             
             if st.session_state.current_mode == "Vendor Research":
                 vendor_name = st.session_state.vendor_name
@@ -553,13 +554,27 @@ if st.session_state.current_task in ["generating_vendor_report", "generating_pro
         success = False
         
     finally:
-        st.session_state.generation_in_progress = False
+        st.session_state.generation_in_progress = False # Reset legacy flag regardless
         # UI feedback based on success/failure
         if success:
             st.success("Report generation completed successfully!")
+            # Update current_task based on the mode and completion status
+            if st.session_state.current_mode == "Vendor Research":
+                st.session_state.current_task = "vendor_report_completed"
+            elif st.session_state.current_mode == "Product Research":
+                # Decide the next state based on whether questions were generated
+                if st.session_state.filtering_questions:
+                    st.session_state.current_task = "awaiting_filter_input"
+                else:
+                    # If no questions, transition to awaiting_filter_input but show a warning
+                    st.session_state.current_task = "awaiting_filter_input"
+                    st.warning("Initial analysis complete, but no filtering questions were generated.")
         else:
             st.error("Report generation encountered an error. See details below.")
-        time.sleep(1) # Brief delay for feedback
+            # Reset task on failure to allow retry from the start
+            st.session_state.current_task = None
+        # Remove delay to maximize throughput
+        # time.sleep(1) # Brief delay for feedback
         st.rerun() # Refresh the app to show results
 
 # --- Filtering Execution Block ---
@@ -658,42 +673,49 @@ if st.session_state.phase2_in_progress:
             st.success("Phase 2 completed successfully!")
         else:
             st.error("Phase 2 processing encountered an error.")
-        time.sleep(1)
+        # Remove delay to maximize throughput
+        # time.sleep(1) # Brief delay for feedback
         st.rerun()
 
 # --- Deep Dive Execution Block ---
-if st.session_state.deep_dive_in_progress:
+if st.session_state.current_task == "generating_deepdives": # Check if task is deep dive generation
     st.header("⚙️ Running Deep Dive Vendor Research...")
     try:
         success = False
         with st.spinner("Processing deep dives (this may take several minutes)..."):
             base_dir = Path(st.session_state.product_base_dir)
+            # Use the CLEAN vendor names from deep_dive_selection
             vendors_to_research = st.session_state.deep_dive_selection
-            
-            # Modified to handle dashboard data return
+
+            # Ensure vendors_to_research contains clean names
+            print(f"DEBUG: Vendors selected for deep dive: {vendors_to_research}")
+
             deep_dive_results_dict = trigger_vendor_deep_dives(
                 base_dir=base_dir,
                 vendors_to_research=vendors_to_research,
-                context_company_name=context_company_name,
+                context_company_name=st.session_state.optional_inputs_storage.get('context_company_name', ''),
                 optional_inputs=st.session_state.optional_inputs_storage.get('optional_inputs', {})
             )
-            
-            # Store results {vendor: (stats, pdf, dashboard)}
+
             st.session_state.deep_dive_results = deep_dive_results_dict
             success = bool(deep_dive_results_dict)
-            
+
     except Exception as e:
         st.error(f"Error during deep dive processing: {str(e)}")
         import traceback
         print(f"Deep Dive Error: {traceback.format_exc()}")
         success = False
     finally:
-        st.session_state.deep_dive_in_progress = False
-        # UI feedback
+        st.session_state.deep_dive_in_progress = False # Reset legacy flag
+        # --- ADD STATE TRANSITION HERE ---
         if success:
             st.success("Deep dive research completed!")
+            st.session_state.current_task = "awaiting_final_pdf" # Transition to next state
         else:
             st.error("Deep dive processing encountered an error.")
+            # Decide where to go on error - maybe back to selection?
+            st.session_state.current_task = "awaiting_deepdive_selection"
+        # --- END STATE TRANSITION ---
         time.sleep(1)
         st.rerun()
 
@@ -797,14 +819,114 @@ if research_mode == "Vendor Research":
 # Display Product Mode Results Stages
 elif research_mode == "Product Research":
     # Stage 1: Initial Analysis Done, Awaiting Filtering Input
-    if st.session_state.product_initial_run_complete and not st.session_state.filter_answers_submitted and not st.session_state.filtering_in_progress:
-        # Keep existing UI for displaying initial summary & filtering chat
-        pass
+    if st.session_state.current_task == "awaiting_filter_input":
+        st.subheader("Filter Vendors Based on Your Needs")
+        st.info("Please answer the questions below to help narrow down the vendor list.")
+
+        # Display chat messages
+        if "filter_messages" not in st.session_state:
+             st.session_state.filter_messages = []
+        if "current_question_index" not in st.session_state:
+             st.session_state.current_question_index = 0
+        if "filter_answers" not in st.session_state:
+             st.session_state.filter_answers = {} # Stores {question: answer}
+
+        # Add the first question if messages are empty and questions exist
+        if not st.session_state.filter_messages and st.session_state.filtering_questions:
+             st.session_state.filter_messages.append({"role": "assistant", "content": st.session_state.filtering_questions[0]})
+
+        # Display existing chat messages
+        for message in st.session_state.filter_messages:
+             with st.chat_message(message["role"]):
+                  st.markdown(message["content"])
+
+        # Chat input for user's answer
+        prompt = st.chat_input("Your answer...")
+        if prompt:
+            # Add user message to chat history
+            st.session_state.filter_messages.append({"role": "user", "content": prompt})
+
+            # Store the answer
+            current_question = st.session_state.filtering_questions[st.session_state.current_question_index]
+            st.session_state.filter_answers[current_question] = prompt
+
+            # Move to the next question or finish
+            st.session_state.current_question_index += 1
+            if st.session_state.current_question_index < len(st.session_state.filtering_questions):
+                # Ask the next question
+                next_question = st.session_state.filtering_questions[st.session_state.current_question_index]
+                st.session_state.filter_messages.append({"role": "assistant", "content": next_question})
+            else:
+                # All questions answered, add submit button
+                st.session_state.filter_messages.append({"role": "assistant", "content": "Thank you! Click the button below to filter the vendors based on your answers."})
+                # Set flag to show button (handled below)
+
+            st.rerun() # Rerun to display new messages
+
+        # Check if all questions have been asked (based on message history)
+        # Count assistant messages asking questions + final confirmation message
+        assistant_question_msgs = sum(1 for msg in st.session_state.filter_messages
+                                      if msg["role"] == "assistant" and msg["content"] in st.session_state.filtering_questions)
+        all_questions_asked = assistant_question_msgs == len(st.session_state.filtering_questions)
+        # Also check if last message is the confirmation message
+        last_message_is_confirmation = (st.session_state.filter_messages and
+                                         st.session_state.filter_messages[-1]["role"] == "assistant" and
+                                         "Click the button below" in st.session_state.filter_messages[-1]["content"])
+
+        # Show submit button only after all questions are answered and confirmation is shown
+        if all_questions_asked and last_message_is_confirmation:
+            if st.button("Filter Vendors Now", key="submit_filter_answers"):
+                 # Transition state to start filtering
+                 st.session_state.current_task = "filtering_vendors"
+                 st.session_state.error_message = None # Clear previous errors
+                 st.rerun()
 
     # Stage 2: Filtering Done, Awaiting Phase 2 Trigger
-    elif st.session_state.filter_answers_submitted and not st.session_state.phase2_run_complete and not st.session_state.phase2_in_progress:
+    elif st.session_state.current_task == "displaying_filtered_results":
         # Keep existing UI for displaying filtered list & comparison setup
-        pass
+        st.subheader("Filtered Vendor List")
+        if st.session_state.filtered_vendors is not None:
+             if st.session_state.filtered_vendors:
+                  st.success(f"Found {len(st.session_state.filtered_vendors)} matching vendors:")
+                  # Display vendors in a more readable format
+                  vendor_cols = st.columns(min(len(st.session_state.filtered_vendors), 4))
+                  for i, vendor in enumerate(st.session_state.filtered_vendors):
+                        with vendor_cols[i % len(vendor_cols)]:
+                            st.markdown(f"- **{vendor}**")
+             else:
+                  st.warning("No vendors matched your filtering criteria.")
+
+             # --- Comparison Criteria Setup ---
+             st.subheader("Setup Vendor Comparison")
+             st.write("Select criteria for comparing the filtered vendors:")
+             selected_criteria = st.multiselect(
+                  "Comparison Criteria:",
+                  options=st.session_state.comparison_criteria_options,
+                  default=st.session_state.comparison_criteria_options[:3], # Default to first 3
+                  key="comparison_select"
+             )
+             st.session_state.selected_comparison_criteria = selected_criteria
+
+             # --- Trigger Phase 2 Button ---
+             if selected_criteria and st.session_state.filtered_vendors:
+                  if st.button("Generate Comparison & Profiles", key="trigger_phase2"):
+                        # Prepare arguments for Phase 2 run (using stored values)
+                        stored_optional_inputs = st.session_state.optional_inputs_storage.get('optional_inputs', {})
+                        stored_context_company = st.session_state.optional_inputs_storage.get('context_company_name', '')
+                        stored_product_category = st.session_state.optional_inputs_storage.get('product_identifier', '')
+
+                        # Set flags and rerun
+                        st.session_state.phase2_in_progress = True # Use this flag to trigger execution block
+                        st.session_state.current_task = "generating_phase2" # Set state
+                        st.session_state.error_message = None
+                        st.rerun()
+             elif not st.session_state.filtered_vendors:
+                 st.info("Cannot proceed to comparison as no vendors were filtered.")
+
+        else:
+             st.error("Filtering results not available. Please try again or check logs.")
+             if st.session_state.error_message:
+                  st.error(f"Filtering Error: {st.session_state.error_message}")
 
     # Stage 3: Phase 2 Done, Display Intermediate Results, Awaiting Deep Dive Trigger
     elif st.session_state.phase2_run_complete and not st.session_state.deep_dive_in_progress and not st.session_state.final_pdf_generated:
@@ -884,8 +1006,9 @@ elif research_mode == "Product Research":
                 if not stored_optional_inputs:
                     stored_optional_inputs = optional_inputs
                 
-                # Set flags and trigger deep dives
-                st.session_state.deep_dive_in_progress = True
+                # Set flags and trigger deep dives - use state machine
+                st.session_state.deep_dive_in_progress = True # Keep for backward compatibility 
+                st.session_state.current_task = "generating_deepdives" # Use state machine
                 st.session_state.error_message = None
                 st.rerun()
 
@@ -896,67 +1019,79 @@ elif research_mode == "Product Research":
                 st.rerun()
 
     # Stage 4: Deep Dives Done, Awaiting Final PDF Trigger
-    elif st.session_state.deep_dive_results is not None and not st.session_state.final_pdf_generated:
+    elif st.session_state.current_task == "awaiting_final_pdf":
         st.subheader("Deep Dive Results Summary")
-        
-        # Display Deep Dive Results for each vendor
+
         if st.session_state.deep_dive_results:
-            for vendor, (stats, pdf_path, dashboard_data, deep_dive_dir) in st.session_state.deep_dive_results.items():
-                with st.expander(f"Deep Dive: {vendor}", expanded=True):
-                    # Display vendor dashboard if available
-                    if dashboard_data and 'error' not in dashboard_data:
-                        st.subheader(f"Dashboard Summary: {vendor}")
-                        display_dashboard(dashboard_data)
-                    
-                    # Display PDF download button if available
-                    if pdf_path and Path(pdf_path).exists():
-                        col_btn, col_spacer = st.columns([1, 3])
-                        with col_btn:
-                            with open(pdf_path, "rb") as file:
-                                st.download_button(
-                                    label=f"Download {vendor} PDF",
-                                    data=file,
-                                    file_name=Path(pdf_path).name,
-                                    mime="application/pdf",
-                                    key=f"download-{vendor}-btn",
-                                    use_container_width=True
-                                )
-                        
-                        # Option to view PDF inline
-                        if st.checkbox(f"View {vendor} PDF inline", key=f"view-{vendor}-pdf"):
-                            display_pdf(Path(pdf_path))
-                    
-                    # Show basic stats
-                    if stats and stats.get('summary'):
-                        summary = stats.get('summary')
-                        stats_col1, stats_col2 = st.columns(2)
-                        with stats_col1:
-                            st.metric("Successful Sections", summary.get("successful_sections", 0))
-                            st.metric("Processing Time", summary.get("formatted_execution_time", "N/A"))
-                        with stats_col2:
-                            st.metric("Total Tokens Used", summary.get("total_tokens", 0))
-                            st.metric("Status", "Complete" if not summary.get("was_interrupted", False) else "Interrupted")
-                    else:
-                        st.warning(f"No stats available for {vendor}")
+            # Loop through results: {vendor: (stats, pdf_path, dashboard_data, deep_dive_dir)}
+            for vendor, result_tuple in st.session_state.deep_dive_results.items():
+                 # Check if result_tuple is valid
+                 if not isinstance(result_tuple, tuple) or len(result_tuple) < 4:
+                     st.error(f"Incomplete deep dive result format for {vendor}. Skipping display.")
+                     print(f"DEBUG: Invalid deep dive result for {vendor}: {result_tuple}")
+                     continue
+
+                 stats, pdf_path, dashboard_data, deep_dive_dir = result_tuple
+
+                 # Display vendor-specific results
+                 with st.expander(f"Deep Dive: {vendor}", expanded=True):
+                     # Display vendor dashboard if available
+                     if dashboard_data and isinstance(dashboard_data, dict) and 'error' not in dashboard_data:
+                         st.subheader(f"Dashboard Summary: {vendor}")
+                         display_dashboard(dashboard_data) # Use existing dashboard display function
+                     elif dashboard_data and isinstance(dashboard_data, dict) and 'error' in dashboard_data:
+                          st.warning(f"Could not generate dashboard for {vendor}. Error: {dashboard_data['error']}")
+                          if 'raw_response' in dashboard_data:
+                               with st.expander("Show Raw Dashboard Response"):
+                                    st.code(dashboard_data['raw_response'], language=None)
+
+                     # Display PDF download button if available
+                     if pdf_path and Path(pdf_path).exists():
+                         col_btn_dd, col_spacer_dd = st.columns([1, 3])
+                         with col_btn_dd:
+                             try:
+                                 with open(pdf_path, "rb") as file:
+                                     st.download_button(
+                                         label=f"Download {vendor} PDF",
+                                         data=file,
+                                         file_name=Path(pdf_path).name,
+                                         mime="application/pdf",
+                                         key=f"download-dd-{vendor}-btn", # Unique key
+                                         use_container_width=True
+                                     )
+                             except Exception as file_e:
+                                 st.error(f"Error reading PDF file for {vendor}: {file_e}")
+
+                         # Option to view PDF inline
+                         if st.checkbox(f"View {vendor} PDF inline", key=f"view-dd-{vendor}-pdf"): # Unique key
+                             display_pdf(Path(pdf_path))
+                     elif pdf_path:
+                          st.warning(f"Deep dive PDF path found for {vendor}, but file does not exist: {pdf_path}")
+                     else:
+                          st.info(f"No deep dive PDF generated or found for {vendor}.")
+
+                     # Show basic stats
+                     if stats and isinstance(stats.get('summary'), dict):
+                         summary = stats.get('summary')
+                         stats_col1, stats_col2 = st.columns(2)
+                         with stats_col1:
+                             st.metric("Successful Sections", summary.get("successful_sections", 0))
+                             st.metric("Processing Time", summary.get("formatted_execution_time", "N/A"))
+                         with stats_col2:
+                             st.metric("Total Tokens Used", summary.get("total_tokens", 0))
+                             st.metric("Status", "Complete" if not summary.get("was_interrupted", False) else "Interrupted")
+                             if summary.get('error'):
+                                 st.error(f"Error: {summary.get('error')}")
+                     else:
+                         st.warning(f"No valid stats summary available for {vendor}")
         else:
-            st.warning("No deep dive results available")
-        
-        if st.button("Generate Final Complete PDF Report", disabled=st.session_state.final_pdf_in_progress):
-            # Use stored inputs from initial phase
-            stored_optional_inputs = st.session_state.optional_inputs_storage.get('optional_inputs', {})
-            stored_context_company = st.session_state.optional_inputs_storage.get('context_company_name', '')
-            stored_product_category = st.session_state.optional_inputs_storage.get('product_identifier', '')
-            
-            # Fill in any missing values from current sidebar (fallback)
-            if not stored_context_company:
-                stored_context_company = context_company_name
-            if not stored_product_category:
-                stored_product_category = identifier_value
-            if not stored_optional_inputs:
-                stored_optional_inputs = optional_inputs
-            
-            # Set flags and trigger final PDF generation
-            st.session_state.final_pdf_in_progress = True
+            st.warning("No deep dive results available or deep dives were skipped.")
+
+        # Button to trigger final combined report
+        final_generation_in_progress = (st.session_state.current_task == "generating_final_pdf")
+        if st.button("Generate Final Combined PDF Report", key="trigger_final_pdf", disabled=final_generation_in_progress):
+            # Set state and trigger final generation
+            st.session_state.current_task = "generating_final_pdf"
             st.session_state.error_message = None
             st.rerun()
 

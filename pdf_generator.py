@@ -157,20 +157,35 @@ class EnhancedPDFGenerator:
         
     def _process_headings(self, soup):
         """Add classes and IDs to headings for better navigation without visible permalinks."""
-        # Process all headings for better styling and navigation
+        # Keep track of generated IDs to ensure uniqueness
+        generated_ids = set()
+
         for h_tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
-            # Add classes based on heading level
             h_tag['class'] = h_tag.get('class', []) + [f'heading-{h_tag.name}']
-            
-            # Generate an ID from the heading text if it doesn't have one
+
             if not h_tag.get('id'):
                 heading_text = h_tag.get_text().strip()
-                heading_id = re.sub(r'[^\w\s-]', '', heading_text.lower())
-                heading_id = re.sub(r'[\s-]+', '-', heading_id)
-                h_tag['id'] = heading_id
-            
-            # We no longer add the visible paragraph symbol anchor
-            # Just ensure the heading has an ID for internal linking
+                base_id = re.sub(r'[^\w\s-]', '', heading_text.lower())
+                base_id = re.sub(r'[\s-]+', '-', base_id).strip('-') # Ensure it doesn't start/end with '-'
+
+                # --- ADD UNIQUENESS CHECK ---
+                final_id = base_id
+                counter = 1
+                while final_id in generated_ids:
+                    final_id = f"{base_id}-{counter}"
+                    counter += 1
+                # --- END UNIQUENESS CHECK ---
+
+                if final_id: # Only add ID if one could be generated
+                    h_tag['id'] = final_id
+                    generated_ids.add(final_id) # Add the final ID to the set
+
+            # Existing IDs might also clash, add them to the set
+            elif h_tag.get('id') in generated_ids:
+                 # Optionally, log a warning about predefined duplicate IDs
+                 print(f"Warning: Duplicate predefined ID found: {h_tag.get('id')}")
+            elif h_tag.get('id'):
+                 generated_ids.add(h_tag.get('id'))
 
     def _cleanup_raw_markdown(self, content: str) -> str:
         """Clean up common LLM formatting issues like literal '\n'."""
@@ -542,16 +557,18 @@ class EnhancedPDFGenerator:
             processed_sections = self._process_sections(sections_data)
             
             # Render the HTML template with the processed sections
-            rendered_html = self.template.render(
-                title=metadata.get('title', 'Generated Report'),
-                identifier=metadata.get('identifier', ''),
-                language=metadata.get('language', 'English'),
-                sections=processed_sections,
-                report_type=metadata.get('report_type', 'Report'),
-                generation_timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                toc=self._generate_toc(processed_sections),
-                **metadata  # Pass along all other metadata
-            )
+            render_context = {
+                'sections': processed_sections,
+                'generation_timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                'toc': self._generate_toc(processed_sections),
+                'metadata': metadata,  # Pass the metadata dictionary under the key 'metadata'
+                # Add top-level variables expected by the template
+                'company_name': metadata.get('context_company_name', 'Context Company'),
+                'logo_path': metadata.get('logo_path', None),
+                'favicon_path': metadata.get('favicon_path', None),
+                'generation_date': datetime.now().strftime("%Y-%m-%d")
+            }
+            rendered_html = self.template.render(**render_context)
             
             # Save the HTML to a file for debugging if needed
             output_html_path = Path(output_path).with_suffix('.html')
@@ -777,7 +794,6 @@ class EnhancedPDFGenerator:
                     font-family: Monaco, Consolas, "Courier New", monospace;
                     font-size: 9pt;
                     line-height: 1.4;
-                    overflow-x: auto;
                     white-space: pre-wrap;
                     word-wrap: break-word;
                 }
@@ -1085,273 +1101,143 @@ class EnhancedPDFGenerator:
         return metadata, main_content, sources_content
 
 def process_markdown_files(
-    base_dir: Path, 
-    identifier: str, 
-    report_type_name: str, 
-    section_order: Optional[List[Tuple[str, str]]] = None, 
-    template_path: Optional[str] = None,
-    stages: Optional[List[str]] = None,
-    stage_dirs: Optional[Dict[str, Path]] = None,
-    filtered_vendors: Optional[List[str]] = None,  # Added for product reports
-    deep_dive_vendors: Optional[List[str]] = None,  # Added for final product reports
-    deep_dive_dirs: Optional[Dict[str, str]] = None  # Mapping of vendor names to their deep dive base dirs
+    base_dir: Path,
+    identifier: str,
+    report_type_name: str,
+    section_order: List[Tuple[str, str]] = None,
+    filtered_vendors: List[str] = None,
+    deep_dive_vendors: List[str] = None,
+    deep_dive_dirs: Dict[str, str] = None,
+    stages: Optional[Dict] = None
 ) -> Optional[Path]:
     """
-    Process markdown files based on a given section order and generate a PDF.
-    
+    Process all markdown files in a directory and generate a PDF.
     Args:
-        base_dir: The base directory containing markdown and pdf folders
-        identifier: The vendor name or product category
-        report_type_name: Used for the PDF filename (e.g., "VendorReport", "ProductReport")
-        section_order: The list of (id, title) tuples to determine order and titles
-        template_path: Optional custom template path
-        stages: List of stage names to process in order (e.g., ['research', 'analysis', 'final'])
-        stage_dirs: Dictionary mapping stage names to directory paths, if stages are in different locations
-        filtered_vendors: List of filtered vendors for product reports
-        deep_dive_vendors: List of vendors for which deep dives were executed
-        deep_dive_dirs: Mapping of vendor names to their deep dive base directories
-        
+        base_dir: Base directory containing markdown/ and pdf/ subdirectories
+        identifier: Vendor or product name
+        report_type_name: Type of report (e.g., "VendorReport", "ProductReport")
+        section_order: List of tuples (section_id, section_title) defining the order
+        filtered_vendors: (For product reports) List of vendor names after filtering
+        deep_dive_vendors: (For product reports) List of vendors with deep dives
+        deep_dive_dirs: (For product reports) Dict mapping vendor names to their deep dive directories
+        stages: (For product reports) Dict with stage information for the report
+
     Returns:
-        Path to the generated PDF or None if no sections were found
+        Path to the generated PDF file or None if error
     """
-    pdf_dir = base_dir / 'pdf'
-    os.makedirs(pdf_dir, exist_ok=True)
-
-    sections = []
+    markdown_dir = base_dir / "markdown"
+    pdf_dir = base_dir / "pdf"
     
-    # Use section_order if provided, otherwise fall back to SECTION_ORDER from config
+    if not markdown_dir.exists():
+        print(f"Markdown directory does not exist: {markdown_dir}")
+        return None
+    
+    pdf_dir.mkdir(exist_ok=True)
+    
     if section_order is None:
-        section_order = SECTION_ORDER
+        print("Warning: No section order provided. Using alphabetical order.")
+        section_files = sorted(markdown_dir.glob("*.md"))
+        section_order = [(p.stem, p.stem.replace('_', ' ').title()) for p in section_files]
     
-    print(f"Using section order: {[s[0] for s in section_order]}")
-
-    if not section_order:
-         print("Error: No section order provided or available in config.")
-         return None
-    
-    # If no stages specified, use the default single-stage approach with markdown dir in base_dir
-    if not stages:
-        markdown_dirs = [base_dir / 'markdown']
-        print(f"Looking for markdown files in: {markdown_dirs[0]}")
-    else:
-        # Handle multi-stage processing
-        markdown_dirs = []
-        for stage in stages:
-            if stage_dirs and stage in stage_dirs:
-                # Use the provided custom directory for this stage
-                stage_path = stage_dirs[stage]
-                if not stage_path.is_absolute():
-                    stage_path = base_dir / stage_path
-            else:
-                # Default to base_dir/stage_name/markdown
-                stage_path = base_dir / stage / 'markdown'
-            
-            markdown_dirs.append(stage_path)
-            print(f"Looking for {stage} stage markdown files in: {stage_path}")
-
-    # Special handling for vendor deep dives if specified
-    deep_dive_sections = []
-    if deep_dive_vendors and len(deep_dive_vendors) > 0:
-        print(f"Processing deep dives for vendors: {deep_dive_vendors}")
-        
-        vendor_section_order = None
-        # Try to import VENDOR_SECTION_ORDER from config for organizing deep dive content
-        try:
-            from config import VENDOR_SECTION_ORDER
-            vendor_section_order = VENDOR_SECTION_ORDER
-            print(f"Using VENDOR_SECTION_ORDER for deep dive content organization")
-        except ImportError:
-            print("Could not import VENDOR_SECTION_ORDER from config, will use alphabetical ordering")
-        
-        for vendor_name in deep_dive_vendors:
-            # Clean the vendor name for use in directory names
-            clean_vendor_name = re.sub(r'[\\/*?:"<>| ]', "_", vendor_name)
-            deep_dive_dir = None
-            
-            # First try to get the path from the deep_dive_dirs mapping if available
-            if deep_dive_dirs and vendor_name in deep_dive_dirs and deep_dive_dirs[vendor_name]:
-                try:
-                    deep_dive_dir_str = deep_dive_dirs[vendor_name]
-                    deep_dive_dir = Path(deep_dive_dir_str)
-                    if deep_dive_dir.exists() and deep_dive_dir.is_dir():
-                        print(f"Found deep dive directory for {vendor_name} from mapping: {deep_dive_dir}")
-                    else:
-                        print(f"Deep dive directory from mapping does not exist: {deep_dive_dir}")
-                        deep_dive_dir = None
-                except Exception as e:
-                    print(f"Error using deep dive directory from mapping for {vendor_name}: {e}")
-                    deep_dive_dir = None
-            
-            # If no path from mapping or it doesn't exist, try alternative methods
-            if not deep_dive_dir:
-                # Attempt pattern-based discovery
-                print(f"No valid deep dive directory found from mapping for {vendor_name}, trying pattern search...")
-                
-                # Search for a matching deep dive directory
-                # Pattern: base_dir/vendor_VendorName_timestamp, or custom pattern
-                
-                # Check potential deep dive directory patterns
-                potential_patterns = [
-                    f"vendor_{clean_vendor_name}_*",        # Expected pattern
-                    f"VendorResearch_{clean_vendor_name}_*",  # Alternative pattern
-                    f"*_{clean_vendor_name}_*",               # Generalized pattern
-                    f"*deep*dive*{clean_vendor_name}*",       # Deep dive keyword pattern
-                    clean_vendor_name                         # Simple vendor name pattern
-                ]
-                
-                # Find the first matching directory
-                for pattern in potential_patterns:
-                    matches = list(base_dir.glob(pattern))
-                    if not matches:
-                        # Try parent directory if available
-                        parent_dir = base_dir.parent if base_dir.parent != base_dir else None
-                        if parent_dir:
-                            matches = list(parent_dir.glob(pattern))
-                    
-                    for match in matches:
-                        if match.is_dir():
-                            deep_dive_dir = match
-                            print(f"Found deep dive directory for {vendor_name} using pattern '{pattern}': {deep_dive_dir}")
-                            break
-                    if deep_dive_dir:
-                        break
-                    
-                # If no dedicated directory found, try subdirectories of base_dir
-                if not deep_dive_dir:
-                    print(f"No pattern match found for {vendor_name}, checking subdirectories...")
-                    for subdir in base_dir.iterdir():
-                        if subdir.is_dir() and any(keyword in subdir.name.lower() for keyword in ["deep", "dive", "vendor", clean_vendor_name.lower()]):
-                            # Check if this might be a deep dive directory
-                            potential_vendor_dir = subdir / clean_vendor_name
-                            if potential_vendor_dir.exists() and potential_vendor_dir.is_dir():
-                                deep_dive_dir = potential_vendor_dir
-                                print(f"Found deep dive directory in subdirectory: {deep_dive_dir}")
-                                break
-                            elif clean_vendor_name.lower() in subdir.name.lower():
-                                deep_dive_dir = subdir
-                                print(f"Found potential deep dive directory by name match: {deep_dive_dir}")
-                                break
-            
-            if deep_dive_dir:
-                print(f"Processing deep dive content for {vendor_name} from {deep_dive_dir}")
-                
-                # Look for the markdown directory within the deep dive directory
-                dd_markdown_dir = deep_dive_dir / "markdown"
-                if dd_markdown_dir.exists() and dd_markdown_dir.is_dir():
-                    # Create a section for this vendor's deep dive
-                    dd_section_content = f"# Deep Dive: {vendor_name}\n\n"
-                    
-                    # Process files in order if vendor_section_order is available, otherwise alphabetically
-                    if vendor_section_order:
-                        # Use vendor section order for organized content
-                        for section_id, section_title in vendor_section_order:
-                            dd_file = dd_markdown_dir / f"{section_id}.md"
-                            if dd_file.exists():
-                                try:
-                                    with open(dd_file, 'r', encoding='utf-8') as f:
-                                        section_content = f.read().strip()
-                                        if section_content:
-                                            dd_section_content += f"## {section_title}\n\n{section_content}\n\n"
-                                except Exception as e:
-                                    print(f"Error reading deep dive file {dd_file}: {e}")
-                    else:
-                        # Fallback to alphabetical sorting
-                        dd_files = sorted(list(dd_markdown_dir.glob("*.md")))
-                        for dd_file in dd_files:
-                            # Skip potential system or temporary files
-                            if dd_file.name.startswith('.') or dd_file.name.startswith('~'):
-                                continue
-                                
-                            try:
-                                with open(dd_file, 'r', encoding='utf-8') as f:
-                                    section_content = f.read().strip()
-                                    if section_content:
-                                        section_title = dd_file.stem.replace('_', ' ').title()
-                                        dd_section_content += f"## {section_title}\n\n{section_content}\n\n"
-                            except Exception as e:
-                                print(f"Error reading deep dive file {dd_file}: {e}")
-                    
-                    # Create a deep dive section for this vendor
-                    if dd_section_content.strip() != f"# Deep Dive: {vendor_name}":  # Check if we added content
-                        deep_dive_sections.append(PDFSection(
-                            id=f"deep_dive_{clean_vendor_name}",
-                            title=f"Deep Dive: {vendor_name}",
-                            content=dd_section_content
-                        ))
-                        print(f"Added deep dive section for {vendor_name}")
-                    else:
-                        print(f"No content found in deep dive markdown files for {vendor_name}")
-                else:
-                    print(f"No markdown directory found in deep dive directory for {vendor_name}: {deep_dive_dir}")
-            else:
-                print(f"Could not find deep dive directory for vendor: {vendor_name}")
-
-    # Process each section from the main section order
+    # Collect sections in the specified order
+    sections = []
     for section_id, section_title in section_order:
-        # Special handling for vendor deep dives section
-        if section_id == "vendor_deep_dives":
-            if deep_dive_sections:
-                # Add all deep dive sections in place of the placeholder
-                sections.extend(deep_dive_sections)
-                print(f"Added {len(deep_dive_sections)} deep dive sections")
-            else:
-                # Add a placeholder section if no deep dive content was found
-                placeholder_content = "# Vendor Deep Dives\n\n"
-                placeholder_content += "No vendor deep dive content was found or specified for this report.\n"
-                
-                sections.append(PDFSection(
-                    id="vendor_deep_dives_placeholder",
-                    title="Vendor Deep Dives",
-                    content=placeholder_content
-                ))
-                print("Added placeholder for vendor deep dives (no content available)")
+        section_file = markdown_dir / f"{section_id}.md"
+        
+        # Skip missing files but warn about them
+        if not section_file.exists():
+            print(f"Warning: Section file not found: {section_file}")
             continue
+        
+        # Read the content from the file
+        try:
+            with open(section_file, 'r', encoding='utf-8') as f:
+                section_content = f.read()
             
-        section_content = None
-        source_dir = None
-        
-        # Look for the section file in each directory, prioritizing later stages
-        for markdown_dir in markdown_dirs:
-            file_path = markdown_dir / f"{section_id}.md"
-            if file_path.exists():
-                try:
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                    if content.strip():
-                        section_content = content
-                        source_dir = markdown_dir
-                        print(f"Found section {section_id} in {markdown_dir}")
-                except Exception as e:
-                    print(f"Error reading section file {file_path}: {e}")
-        
-        # Add the section if we found content for it
-        if section_content:
-            section = PDFSection(
+            # Create the PDFSection with correct field names
+            sections.append(PDFSection(
                 id=section_id,
                 title=section_title,
                 content=section_content
-            )
-            sections.append(section)
-        else:
-            print(f"Section file not found in any directory, skipping: {section_id}.md")
-
-    if not sections:
-        print("No non-empty markdown sections found to generate PDF.")
-        return None
-
-    pdf_generator = EnhancedPDFGenerator(template_path)
-    # Sanitize identifier for filename
-    safe_identifier = re.sub(r'[\\/*?:"<>| ]', "_", identifier)
+            ))
+        except Exception as e:
+            print(f"Error reading section file {section_file}: {e}")
+            continue
     
-    # Add stage information to filename if using stages
-    if stages:
-        stage_suffix = f"_{'-'.join(stages)}"
-    else:
-        stage_suffix = ""
-        
-    output_filename = f"{safe_identifier}{stage_suffix}_{report_type_name}.pdf"
+    # Add deep dive sections if specified
+    if deep_dive_vendors and deep_dive_dirs:
+        for vendor_name in deep_dive_vendors:
+            # Skip if vendor is not in the deep_dive_dirs mapping
+            if vendor_name not in deep_dive_dirs or not deep_dive_dirs[vendor_name]:
+                print(f"Warning: Deep dive directory for vendor {vendor_name} not found in mapping.")
+                continue
+            
+            # Get the base directory for this vendor's deep dive
+            vendor_dir_str = deep_dive_dirs[vendor_name]
+            if not vendor_dir_str:
+                print(f"Warning: Empty deep dive directory path for vendor {vendor_name}.")
+                continue
+                
+            vendor_dir = Path(vendor_dir_str)
+            vendor_markdown_dir = vendor_dir / "markdown"
+            
+            if not vendor_markdown_dir.exists():
+                print(f"Warning: Markdown directory for vendor {vendor_name} not found: {vendor_markdown_dir}")
+                continue
+            
+            # Use a custom section ID/title format for deep dive sections
+            deep_dive_section_id = f"deep_dive_{re.sub(r'[^a-zA-Z0-9_]', '_', vendor_name.lower())}"
+            deep_dive_section_title = f"Deep Dive: {vendor_name}"
+            
+            # Create a temporary concatenated file for this vendor's deep dive content
+            concat_file = markdown_dir / f"{deep_dive_section_id}.md"
+            
+            try:
+                # Gather all markdown files for this vendor, sorted alphabetically
+                vendor_md_files = sorted(vendor_markdown_dir.glob("*.md"))
+                
+                if not vendor_md_files:
+                    print(f"Warning: No markdown files found for vendor {vendor_name} in {vendor_markdown_dir}")
+                    continue
+                
+                # Concatenate all vendor markdown files into a single file with section headers
+                with open(concat_file, 'w', encoding='utf-8') as outfile:
+                    outfile.write(f"# Deep Dive Analysis: {vendor_name}\n\n")
+                    
+                    for md_file in vendor_md_files:
+                        with open(md_file, 'r', encoding='utf-8') as infile:
+                            content = infile.read()
+                            # Add a section header based on the filename
+                            section_name = md_file.stem.replace('_', ' ').title()
+                            outfile.write(f"## {section_name}\n\n")
+                            outfile.write(content)
+                            outfile.write("\n\n")
+                
+                # Read the content from the concatenated file
+                with open(concat_file, 'r', encoding='utf-8') as f:
+                    deep_dive_content = f.read()
+                
+                # Add the concatenated deep dive section with correct field names
+                sections.append(PDFSection(
+                    id=deep_dive_section_id,
+                    title=deep_dive_section_title,
+                    content=deep_dive_content
+                ))
+                    
+            except Exception as e:
+                print(f"Error processing deep dive for vendor {vendor_name}: {e}")
+                import traceback
+                traceback.print_exc()
+    
+    # Configure and initialize the PDF generator
+    template_path = str(Path(__file__).parent / "templates" / "enhanced_report_template.html")
+    pdf_generator = EnhancedPDFGenerator(template_path=template_path)
+    
+    # Generate output path
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_filename = f"{report_type_name}_{re.sub(r'[\\/*?:"<>|]', '_', identifier)}_{timestamp}.pdf"
     output_path = pdf_dir / output_filename
-
+    
     # Pass necessary metadata for the template
     pdf_metadata = {
         'title': f"{identifier} - {report_type_name}",
@@ -1360,12 +1246,41 @@ def process_markdown_files(
         'report_type': report_type_name,
         'stages': stages if stages else None,
         'filtered_vendors': filtered_vendors if filtered_vendors else None,
-        'deep_dive_vendors': deep_dive_vendors if deep_dive_vendors else None
-        # Add other metadata if needed by the template
+        'deep_dive_vendors': deep_dive_vendors if deep_dive_vendors else None,
+        'context_company_name': 'Unknown Company' # Default, will be overwritten if available
     }
 
-    return pdf_generator.generate_pdf(
-        sections,
-        str(output_path),
-        pdf_metadata
-    ) 
+    # Attempt to get context company name if base_dir/misc/generation_config.yaml exists
+    config_path = base_dir / "misc" / "generation_config.yaml"
+    if config_path.exists():
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f_cfg:
+                gen_config = yaml.safe_load(f_cfg)
+                if gen_config and 'context_company_name' in gen_config:
+                    pdf_metadata['context_company_name'] = gen_config['context_company_name']
+        except Exception as e:
+            print(f"Warning: Could not load context_company_name from config file: {e}")
+
+    # Add logo/favicon paths (adjust as needed)
+    # Example: Assuming they are in static/assets relative to pdf_generator.py parent
+    static_assets_dir = Path(__file__).parent / 'templates' / 'assets'
+    logo_file = static_assets_dir / 'logo.png' # Adjust filename if needed
+    favicon_file = static_assets_dir / 'favicon.ico' # Adjust filename if needed
+
+    pdf_metadata['logo_path'] = f"file://{logo_file.resolve()}" if logo_file.exists() else None
+    pdf_metadata['favicon_path'] = f"file://{favicon_file.resolve()}" if favicon_file.exists() else None
+    
+    # Generate the PDF
+    try:
+        pdf_path = pdf_generator.generate_pdf(
+            sections,
+            str(output_path),
+            pdf_metadata
+        )
+        print(f"PDF generated: {pdf_path}")
+        return pdf_path
+    except Exception as e:
+        print(f"Error generating PDF: {e}")
+        import traceback
+        traceback.print_exc()
+        return None 

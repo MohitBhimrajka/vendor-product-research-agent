@@ -240,7 +240,8 @@ def _generate_report_sections(
         for section_id, _ in prompt_func_config
     }
 
-    max_workers = min(len(prompt_func_config), 8) # Limit concurrency slightly more
+    # Maximize workers for full parallelism
+    max_workers = len(prompt_func_config)  # Use as many workers as there are tasks
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {}
@@ -310,6 +311,11 @@ def _generate_report_sections(
     total_execution_time = time.time() - start_time
     # Filter out skipped sections when calculating summary stats unless needed
     valid_results = {k: v for k, v in results.items() if v.get('status') != 'skipped'}
+    
+    # Calculate section counts and success percentage
+    total_sections_requested = len(prompt_func_config)
+    successful_sections_count = sum(1 for r in results.values() if r.get("status") == "success")
+    success_percentage_val = (successful_sections_count / total_sections_requested * 100) if total_sections_requested > 0 else 0
 
     token_stats = {
         "research_mode": research_mode,
@@ -329,11 +335,14 @@ def _generate_report_sections(
             "total_execution_time": total_execution_time,
             "formatted_execution_time": format_time(total_execution_time),
             "timestamp": datetime.now().isoformat(),
-            "successful_sections": sum(1 for r in results.values() if r.get("status") == "success"),
+            "successful_sections": successful_sections_count,
             "failed_sections": sum(1 for r in results.values() if r.get("status") == 'error'),
             "interrupted_sections": sum(1 for r in results.values() if r.get("status") == 'interrupted'),
             "skipped_sections": sum(1 for r in results.values() if r.get("status") == 'skipped'),
-            "was_interrupted": shutdown_requested
+            "was_interrupted": shutdown_requested,
+            # Add the missing keys needed for the summary panel
+            "total_sections": total_sections_requested,
+            "success_percentage": success_percentage_val
         }
     }
 
@@ -405,7 +414,7 @@ def run_vendor_research(
         f"Vendor Research for '{vendor_name}' processing complete.\n"
         f"Time: {token_stats['summary']['formatted_execution_time']}\n"
         f"Token Usage: {token_stats['summary']['total_tokens']} "
-        f"[Input: {token_stats['summary']['input_tokens']}, Output: {token_stats['summary']['output_tokens']}]\n"
+        f"[Input: {token_stats['summary']['total_input_tokens']}, Output: {token_stats['summary']['total_output_tokens']}]\n"
         f"Sections: {token_stats['summary']['successful_sections']}/{token_stats['summary']['total_sections']} "
         f"[{token_stats['summary']['success_percentage']:.1f}%]\n"
         f"PDF Generated: {'Yes' if pdf_path else 'No'}\n"
@@ -447,6 +456,27 @@ def run_product_research_initial(
         console.print(f"[red]Initial product analysis section generation failed for {product_category}.[/red]")
         return None, None, None
 
+    # --- Generate PDF for initial report ---
+    initial_pdf_path = None
+    if token_stats['summary']['successful_sections'] > 0 and not token_stats['summary']['was_interrupted']:
+        console.print(f"\n[bold cyan]Generating initial PDF report for {product_category}...[/bold cyan]")
+        try:
+            # Use the specific section order for the initial analysis PDF
+            initial_pdf_path = process_markdown_files(
+                base_dir=base_dir,
+                identifier=product_category,
+                report_type_name="ProductInitialAnalysis", # Distinct name
+                section_order=PRODUCT_INITIAL_SECTION_ORDER # Use the initial order config
+            )
+            if initial_pdf_path and initial_pdf_path.exists():
+                console.print(f"\n[green]Initial PDF report generated: {initial_pdf_path}[/green]")
+            else:
+                console.print(f"\n[yellow]Initial PDF generation did not return a valid path for {product_category}.[/yellow]")
+        except Exception as pdf_e:
+            console.print(f"\n[red]Error during initial PDF generation for {product_category}: {pdf_e}[/red]")
+            logger.exception(f"Initial PDF Generation Error for {base_dir}")
+    # --- End PDF Generation ---
+
     # Step 2: Extract summary from generated sections for question generation
     # Simple approach: concatenate relevant sections (e.g., market, features, vendors)
     initial_summary_content = ""
@@ -483,7 +513,7 @@ def run_product_research_initial(
         # Use the updated method to generate content
         contents = [types.Content(role="user", parts=[types.Part.from_text(text=question_gen_prompt)])]
         generate_content_config = types.GenerateContentConfig(
-            temperature=0.5, # Lower temp for focused questions
+            temperature=0.7, # Higher temp for faster generation
             response_mime_type="text/plain",
         )
 
@@ -950,7 +980,7 @@ def filter_vendors_based_on_answers(
         # Use updated method to get filtered vendors
         contents = [types.Content(role="user", parts=[types.Part.from_text(text=filter_prompt)])]
         generate_content_config = types.GenerateContentConfig(
-            temperature=0.3  # Low temp for factual filtering
+            temperature=0.7  # Higher temp for faster generation
         )
 
         # Use streaming to get the complete response
@@ -975,7 +1005,14 @@ def filter_vendors_based_on_answers(
             if structured_match:
                 # Parse the structured format
                 vendor_list_text = structured_match.group(1).strip()
-                filtered_vendors = [line.strip() for line in vendor_list_text.split('\n') if line.strip() and not line.strip().startswith('[') and not line.strip() == '...']
+                # --- MODIFICATION START ---
+                # Remove '- ' prefix and strip extra whitespace
+                filtered_vendors = [
+                    line.strip()[2:].strip() if line.strip().startswith('- ') else line.strip()
+                    for line in vendor_list_text.split('\n')
+                    if line.strip() and not line.strip().startswith('[') and not line.strip() == '...'
+                ]
+                # --- MODIFICATION END ---
                 logger.info(f"Parsed {len(filtered_vendors)} vendors from structured format.")
             else:
                 # Fall back to parsing line by line if the structured format is not found
@@ -1067,11 +1104,11 @@ def generate_product_report_phase2(
     filtered_vendors: List[str],
     comparison_criteria: List[str], # From user selection
     progress_context=None
-) -> Optional[Dict]: # Returns updated token_stats summary
+) -> Tuple[Optional[Dict], Optional[Dict]]: # Returns (summary_stats, dashboard_data)
     """
     Generates light profiles, comparison matrix, and relevance sections.
     Appends markdown files to the existing base_dir/markdown.
-    Returns updated token statistics summary for this phase.
+    Returns updated token statistics summary AND dashboard data for this phase.
     """
     global shutdown_requested
     phase2_start_time = time.time()
@@ -1080,14 +1117,14 @@ def generate_product_report_phase2(
     markdown_dir = base_dir / "markdown"
     if not markdown_dir.exists():
         logger.error(f"Markdown directory not found for Phase 2: {markdown_dir}")
-        return None
+        return None, None
 
     api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key: logger.error("GEMINI_API_KEY not found."); return None
+    if not api_key: logger.error("GEMINI_API_KEY not found."); return None, None
     try:
         client = genai.Client(api_key=api_key)
     except Exception as e:
-        logger.error(f"Failed to initialize Google GenAI Client: {e}"); return None
+        logger.error(f"Failed to initialize Google GenAI Client: {e}"); return None, None
 
     phase2_results = {}
     tasks_to_run = [] # List of tuples: (section_id, prompt_func, args_dict, output_filename)
@@ -1095,7 +1132,13 @@ def generate_product_report_phase2(
     # 1. Prepare Light Profile Tasks
     if filtered_vendors:
         for vendor in filtered_vendors:
-            section_id = f"profile_{re.sub(r'[^a-zA-Z0-9_]', '_', vendor)}" # Unique ID per vendor
+            # --- ENSURE CONSISTENT SANITIZATION ---
+            # Use the same sanitization as app.py will use later
+            sanitized_vendor = re.sub(r'[^a-zA-Z0-9_]', '_', vendor)
+            section_id = f"profile_{sanitized_vendor}" # Use sanitized name for internal ID
+            output_filename = f"{section_id}.md" # Output filename
+            # --- END SANITIZATION UPDATE ---
+            
             tasks_to_run.append((
                 section_id,
                 product_prompts.get_vendor_light_profile_prompt, # Use the correct function
@@ -1106,7 +1149,7 @@ def generate_product_report_phase2(
                     'context_company_name': context_company_name,
                     **optional_inputs
                 },
-                f"profile_{section_id}.md" # Output filename
+                output_filename
             ))
     else:
         logger.warning("No filtered vendors provided for profiling.")
@@ -1197,7 +1240,9 @@ def generate_product_report_phase2(
         for task_id, _, _, _ in tasks_to_run
     }
 
-    max_workers = min(len(tasks_to_run), 8)
+    # Maximize workers for Phase 2
+    max_workers = len(tasks_to_run)
+    
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {}
         for section_id, prompt_func, args_dict, output_filename in tasks_to_run:
@@ -1241,6 +1286,7 @@ def generate_product_report_phase2(
                  processed_count += 1
                  progress.update(main_task_p2, completed=processed_count)
 
+
     # --- Compile Stats for Phase 2 ---
     phase2_execution_time = time.time() - phase2_start_time
     valid_results_p2 = {k: v for k, v in phase2_results.items() if v.get('status') != 'skipped'}
@@ -1259,6 +1305,27 @@ def generate_product_report_phase2(
         "sections_generated": list(phase2_results.keys())
     }
 
+    # --- Generate Dashboard Data for Phase 2 ---
+    phase2_dashboard_data = None
+    if phase2_summary.get('successful_sections', 0) > 0 and not phase2_summary.get('was_interrupted', False):
+        try:
+            # We need to pass token_stats-like structure to _generate_dashboard_data
+            # Let's use PRODUCT_FULL_SECTION_ORDER as the reference for now,
+            # as Phase 2 contributes towards the full report.
+            phase2_stats_for_dashboard = {
+                "research_mode": "product",
+                "identifier": product_category,
+                # Use the FULL order because Phase 2 builds part of it
+                "section_order_used": [s[0] for s in PRODUCT_FULL_SECTION_ORDER]
+            }
+            # Pass filtered_vendors context
+            phase2_dashboard_data = _generate_dashboard_data(
+                base_dir, 'product', phase2_stats_for_dashboard, filtered_vendors
+            )
+        except Exception as dash_e:
+            logger.error(f"Error generating Phase 2 dashboard data: {dash_e}")
+    # --- End Dashboard Generation ---
+
     # Optionally save phase 2 stats separately or merge with main stats file
     try:
          misc_dir = base_dir / "misc"
@@ -1270,7 +1337,7 @@ def generate_product_report_phase2(
 
     if progress_context is None: progress.stop()
     console.print(f"[green]Product Report Phase 2 generation finished.[/green]")
-    return phase2_summary
+    return phase2_summary, phase2_dashboard_data # Return both summary and dashboard data
 
 
 # --- New Function for Phase 4: Trigger Deep Dives ---
@@ -1313,8 +1380,8 @@ def trigger_vendor_deep_dives(
         main_task_dd = progress.add_task(f"[cyan]Deep Dive Vendor Research", total=len(vendors_to_research))
     
     try:
-        # Start parallel processing of vendors with reasonable limits
-        max_workers = min(os.cpu_count() or 4, len(vendors_to_research), 4) # Limit concurrency
+        # Start parallel processing of vendors with maximum concurrency
+        max_workers = len(vendors_to_research)  # Use maximum parallelism
         
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all vendor research tasks
@@ -1334,8 +1401,8 @@ def trigger_vendor_deep_dives(
                 )
                 future_to_vendor[future] = vendor_name
                 
-                # Slight delay to avoid overwhelming API
-                time.sleep(0.5)
+                # Remove delay to maximize throughput
+                # time.sleep(0.5)
             
             # Process results as they complete
             for future in as_completed(future_to_vendor):
@@ -1482,12 +1549,18 @@ def _generate_dashboard_data(
     if not section_order_used:
          logger.warning("Cannot determine section order used from token_stats for dashboard generation.")
          # Fallback based on mode - less reliable if structure changes
-         if research_mode == 'vendor': section_order_used = VENDOR_SECTION_ORDER
-         elif research_mode == 'product': section_order_used = PRODUCT_FULL_SECTION_ORDER # Assume full report for final dashboard
+         if research_mode == 'vendor':
+             # Use the actual config list of tuples here for fallback
+             section_order_used_tuples = VENDOR_SECTION_ORDER
+         elif research_mode == 'product':
+             # Use the actual config list of tuples here for fallback
+             section_order_used_tuples = PRODUCT_FULL_SECTION_ORDER # Assume full report for final dashboard
          else: return None
+         # Extract just the IDs if using fallback
+         section_order_used = [sid for sid, _ in section_order_used_tuples]
 
     # Concatenate markdown files in the correct order
-    for section_id, _ in section_order_used:
+    for section_id in section_order_used: # Iterate over the list of strings directly
          # Handle special multi-file sections if needed (or assume simple files for now)
          if section_id in ["vendor_light_profiles", "vendor_deep_dives"]:
               # For now, skip these complex sections in the summary input,
@@ -1499,7 +1572,14 @@ def _generate_dashboard_data(
          if md_path.exists():
              try:
                  with open(md_path, 'r', encoding='utf-8') as f:
-                     full_report_content += f"\n\n## {section_id.replace('_', ' ').title()}\n\n" # Add heading for context
+                     # Find the corresponding title from the original config for better context
+                     title = section_id.replace('_', ' ').title() # Default title
+                     original_config = VENDOR_SECTION_ORDER if research_mode == 'vendor' else PRODUCT_FULL_SECTION_ORDER
+                     for sid_cfg, title_cfg in original_config:
+                         if sid_cfg == section_id:
+                             title = title_cfg
+                             break
+                     full_report_content += f"\n\n## {title}\n\n" # Use title
                      full_report_content += f.read()
              except Exception as e:
                  logger.warning(f"Could not read {md_path} for dashboard summary: {e}")
@@ -1538,7 +1618,7 @@ def _generate_dashboard_data(
         
         contents = [types.Content(role="user", parts=[types.Part.from_text(text=summary_prompt)])]
         generate_content_config = types.GenerateContentConfig(
-            temperature=0.1,  # Low temp for factual extraction
+            temperature=0.7,  # Higher temp for faster generation
             response_mime_type="text/plain",
         )
         
@@ -1584,7 +1664,7 @@ IMPORTANT: Return ONLY the JSON object, with no additional text, markdown format
 """
                     # Use updated API for retry
                     retry_contents = [types.Content(role="user", parts=[types.Part.from_text(text=retry_prompt)])]
-                    retry_config = types.GenerateContentConfig(temperature=0.1)
+                    retry_config = types.GenerateContentConfig(temperature=0.7)  # Higher temp for faster generation
                     
                     # Use streaming to get retry response
                     retry_text = ""
