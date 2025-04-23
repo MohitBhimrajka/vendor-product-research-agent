@@ -107,44 +107,26 @@ def _generate_single_section(client: genai.Client, prompt: str, output_path: Pat
 
         contents = [types.Content(role="user", parts=[types.Part.from_text(text=prompt)])]
         # Enable Gemini Grounding (formerly Google Search)
-        tools = [types.Tool(google_search=types.GoogleSearch(result_count=10))] # Request more results for grounding
+        tools = [types.Tool(google_search=types.GoogleSearch())]  # Removed result_count parameter
         generate_content_config = types.GenerateContentConfig(
             temperature=LLM_TEMPERATURE,
             # Grounding is enabled via the 'tools' parameter in the request
-            # tool_config=types.ToolConfig(google_search_config=types.GoogleSearchConfig(disable_attribution=False)), # Optional: Keep attribution
+            tools=tools,  # Include tools configuration here
             response_mime_type="text/plain",
         )
 
-        # Using blocking call for simplicity in threading, stream handling adds complexity
-        response = client.generate_content(
+        # Using streaming to get the full response
+        full_output = ""
+        for chunk in client.models.generate_content_stream(  # Use models.generate_content_stream instead
             model=LLM_MODEL,
             contents=contents,
-            tools=tools, # Include tools for grounding
-            generation_config=generate_content_config,
-            request_options={'timeout': 600} # 10 minute timeout per section
-        )
-
-        # Check for blocked content or missing parts
-        if not response.candidates:
-            block_reason_msg = "Unknown reason (no candidates)"
-            if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
-                 block_reason_msg = f"Reason: {response.prompt_feedback.block_reason.name}"
-                 if hasattr(response.prompt_feedback, 'safety_ratings'):
-                     block_reason_msg += f" Details: {response.prompt_feedback.safety_ratings}"
-            raise ValueError(f"Content blocked or generation failed. {block_reason_msg}")
-
-        # Safely access content parts
-        full_output = ""
-        if response.candidates[0].content and response.candidates[0].content.parts:
-            full_output = "".join(part.text for part in response.candidates[0].content.parts if hasattr(part, 'text'))
-        else:
-             logger.warning(f"No content parts found in response for {output_path.name}. Response: {response.candidates[0].finish_reason}")
-             # Potentially check finish_reason (e.g., SAFETY, RECITATION, OTHER)
+            config=generate_content_config,
+        ):
+            if chunk.text is not None:
+                full_output += chunk.text
 
         if not full_output.strip():
-             logger.warning(f"Generated empty content for {output_path.name}. Check prompt or model response (Finish Reason: {response.candidates[0].finish_reason}).")
-             # Consider returning an error status if empty content is unacceptable
-             # return { ... "status": "error", "error": "Generated empty content" }
+            logger.warning(f"Generated empty content for {output_path.name}. Check prompt or model response.")
 
         output_tokens = count_tokens(full_output)
 
@@ -392,6 +374,9 @@ def run_vendor_research(
     
     if not token_stats or not base_dir: return None, None, None
     
+    # Store the base_dir in token_stats to ensure it's available for deep dive integration
+    token_stats['base_dir'] = str(base_dir)
+    
     # Only process PDF and dashboard if we have successful sections and weren't interrupted
     pdf_path = None 
     dashboard_data = None
@@ -495,22 +480,26 @@ def run_product_research_initial(
             optional_inputs=optional_inputs
         )
 
-        # Simple blocking call for the questions
-        response = client.generate_content(
-            model=LLM_MODEL, # Use same model or potentially a faster one if suitable
-            contents=[types.Content(role="user", parts=[types.Part.from_text(text=question_gen_prompt)])],
-            generation_config=types.GenerateContentConfig(temperature=0.5) # Lower temp for focused questions
+        # Use the updated method to generate content
+        contents = [types.Content(role="user", parts=[types.Part.from_text(text=question_gen_prompt)])]
+        generate_content_config = types.GenerateContentConfig(
+            temperature=0.5, # Lower temp for focused questions
+            response_mime_type="text/plain",
         )
 
-        if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
-            raw_questions_text = "".join(part.text for part in response.candidates[0].content.parts if hasattr(part, 'text'))
-            # Parse the '- ' prefixed lines into a list
-            filtering_questions = [q.strip('- ').strip() for q in raw_questions_text.strip().split('\n') if q.strip().startswith('- ')]
-            console.print(f"[green]Generated {len(filtering_questions)} filtering questions.[/green]")
-        else:
-             logger.warning("LLM did not generate filtering questions.")
-             if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
-                  logger.warning(f"Reason: {response.prompt_feedback.block_reason}")
+        # Use streaming to get the complete response
+        raw_questions_text = ""
+        for chunk in client.models.generate_content_stream(
+            model=LLM_MODEL,
+            contents=contents,
+            config=generate_content_config,
+        ):
+            if chunk.text is not None:
+                raw_questions_text += chunk.text
+
+        # Parse the '- ' prefixed lines into a list
+        filtering_questions = [q.strip('- ').strip() for q in raw_questions_text.strip().split('\n') if q.strip().startswith('- ')]
+        console.print(f"[green]Generated {len(filtering_questions)} filtering questions.[/green]")
 
     except Exception as e:
         logger.error(f"Failed to generate filtering questions: {e}")
@@ -593,6 +582,9 @@ def run_product_research(
     
     # Default to all vendors if no filtering done
     filtered_vendors = []
+    deep_dive_vendors = []  # Track vendors for deep dives
+    deep_dive_results = {}  # Store deep dive results
+    
     if filtering_questions:
         # CLI-only: Simulate user answers
         if not progress_context:  # Only do interactive mode in CLI, not when called from app
@@ -659,18 +651,54 @@ def run_product_research(
                 title="Product Research Stage 2 Summary", border_style="green"
             ))
             
-            # Generate a final PDF with all sections
+            # --- Stage 3: Deep Dives (Optional, CLI Only) ---
+            if not progress_context and filtered_vendors:  # Only in CLI mode
+                deep_dive_vendors = []
+                dive_option = console.input("\nDo you want to run deep dives on any vendors? (y/n): ").lower()
+                if dive_option == 'y':
+                    vendor_list = "\n".join([f"{i+1}. {v}" for i, v in enumerate(filtered_vendors)])
+                    console.print(f"Available vendors:\n{vendor_list}")
+                    selection = console.input("Enter vendor numbers (comma-separated) for deep dive: ")
+                    try:
+                        selected_indices = [int(idx.strip()) - 1 for idx in selection.split(',') if idx.strip().isdigit()]
+                        deep_dive_vendors = [filtered_vendors[idx] for idx in selected_indices if 0 <= idx < len(filtered_vendors)]
+                        
+                        if deep_dive_vendors:
+                            # Trigger deep dives
+                            deep_dive_results = trigger_vendor_deep_dives(
+                                base_dir=base_dir,
+                                vendors_to_research=deep_dive_vendors,
+                                context_company_name=context_company_name,
+                                optional_inputs=optional_inputs
+                            )
+                            
+                            # Display deep dive summary
+                            deep_dive_summary = "\n".join([
+                                f"• {vendor}: {'Success' if stats.get('summary', {}).get('successful_sections', 0) > 0 else 'Failed'}"
+                                for vendor, (stats, _, _, _) in deep_dive_results.items()
+                            ])
+                            console.print(Panel.fit(
+                                f"Deep Dive Results:\n{deep_dive_summary}",
+                                title="Product Research Stage 3 Summary", border_style="yellow"
+                            ))
+                    except Exception as e:
+                        logger.error(f"Error processing deep dive selection: {e}")
+            
+            # Generate a final PDF with all sections including deep dives
             final_pdf_path = None
             if phase2_stats.get('successful_sections', 0) > 0 and not phase2_stats.get('was_interrupted', False):
                 console.print(f"\n[bold cyan]Generating final PDF report for {product_category}...[/bold cyan]")
                 try:
-                    # Use PRODUCT_FULL_SECTION_ORDER for the final PDF
-                    final_pdf_path = process_markdown_files(
+                    # Generate the final product report with all sections and deep dives
+                    final_pdf_path, final_dashboard_data = generate_final_product_report(
                         base_dir=base_dir,
-                        identifier=product_category,
-                        report_type_name="ProductFullAnalysis",
-                        section_order=PRODUCT_FULL_SECTION_ORDER
+                        product_category=product_category,
+                        context_company_name=context_company_name,
+                        optional_inputs=optional_inputs,
+                        filtered_vendors=filtered_vendors,
+                        deep_dive_vendors=deep_dive_vendors
                     )
+                    
                     if final_pdf_path and final_pdf_path.exists():
                         console.print(f"\n[green]Final PDF report generated: {final_pdf_path}[/green]")
                         return token_stats, final_pdf_path  # Return the final PDF path
@@ -683,39 +711,6 @@ def run_product_research(
             console.print("[yellow]Phase 2 did not return valid statistics.[/yellow]")
     else:
         console.print("[yellow]No vendors filtered/identified for Phase 2. Stopping at initial analysis.[/yellow]")
-    
-    # --- Stage 3: Deep Dives (Optional, CLI Only) ---
-    if not progress_context and filtered_vendors:  # Only in CLI mode
-        deep_dive_vendors = []
-        dive_option = console.input("\nDo you want to run deep dives on any vendors? (y/n): ").lower()
-        if dive_option == 'y':
-            vendor_list = "\n".join([f"{i+1}. {v}" for i, v in enumerate(filtered_vendors)])
-            console.print(f"Available vendors:\n{vendor_list}")
-            selection = console.input("Enter vendor numbers (comma-separated) for deep dive: ")
-            try:
-                selected_indices = [int(idx.strip()) - 1 for idx in selection.split(',') if idx.strip().isdigit()]
-                deep_dive_vendors = [filtered_vendors[idx] for idx in selected_indices if 0 <= idx < len(filtered_vendors)]
-                
-                if deep_dive_vendors:
-                    # Trigger deep dives
-                    deep_dive_results = trigger_vendor_deep_dives(
-                        base_dir=base_dir,
-                        vendors_to_research=deep_dive_vendors,
-                        context_company_name=context_company_name,
-                        optional_inputs=optional_inputs
-                    )
-                    
-                    # Display deep dive summary
-                    deep_dive_summary = "\n".join([
-                        f"• {vendor}: {'Success' if stats[0].get('summary', {}).get('successful_sections', 0) > 0 else 'Failed'}"
-                        for vendor, (stats, _) in deep_dive_results.items()
-                    ])
-                    console.print(Panel.fit(
-                        f"Deep Dive Results:\n{deep_dive_summary}",
-                        title="Product Research Stage 3 Summary", border_style="yellow"
-                    ))
-            except Exception as e:
-                logger.error(f"Error processing deep dive selection: {e}")
     
     # Return initial token stats and PDF path if no final PDF was generated
     return token_stats, initial_pdf_path
@@ -803,111 +798,127 @@ def filter_vendors_based_on_answers(
         with open(vendor_id_section_file, 'r', encoding='utf-8') as f:
             md_content = f.read()
         
-        # First try to extract the YAML-formatted vendor list (structured format)
-        structured_patterns = [
-            # Look for YAML or delimited block formats
-            r"VENDOR_LIST_START\s*\n(.*?)\s*VENDOR_LIST_END",
-            r"```yaml\s*\n(.*?)\s*```",
-            r"VENDORS:\s*\n(.*?)(?:\n\n|\n#|\n\*\*|$)"
-        ]
+        # --- PRIMARY PARSING METHOD: structured VENDOR_LIST format ---
+        structured_format_found = False
+        vendor_list_match = re.search(r"VENDOR_LIST_START\s*\n(.*?)\s*VENDOR_LIST_END", md_content, re.DOTALL)
         
-        for pattern in structured_patterns:
-            match = re.search(pattern, md_content, re.DOTALL)
-            if match:
-                vendor_list_text = match.group(1).strip()
-                # Parse the list (YAML format or line-by-line with leading dash/asterisk)
-                vendor_lines = [line.strip() for line in vendor_list_text.split('\n')]
-                # Extract vendor names (remove leading "-" or "*" and spaces)
-                for line in vendor_lines:
-                    if line.startswith('-') or line.startswith('*'):
-                        vendor_name = line[1:].strip()
-                        if vendor_name and not vendor_name.startswith('[') and not vendor_name.endswith('...]'):
-                            initial_vendors.append(vendor_name)
-                
-                if initial_vendors:
-                    logger.info(f"Parsed {len(initial_vendors)} vendors from structured format using pattern: {pattern}")
-                    break  # Stop once we've found vendors using any pattern
-        
-        # If no vendors found via structured formats, fall back to older parsing methods
-        if not initial_vendors:
-            logger.info("No structured vendor list found, falling back to HTML parsing...")
+        if vendor_list_match:
+            structured_format_found = True
+            vendor_list_text = vendor_list_match.group(1).strip()
+            # Parse the list (each line should have a leading dash or asterisk)
+            vendor_lines = [line.strip() for line in vendor_list_text.split('\n')]
+            # Extract vendor names (remove leading "-" or "*" and spaces)
+            for line in vendor_lines:
+                if line.startswith('-') or line.startswith('*'):
+                    vendor_name = line[1:].strip()
+                    if vendor_name and not vendor_name.startswith('[') and not vendor_name.endswith('...]'):
+                        initial_vendors.append(vendor_name)
             
-            # Convert markdown to HTML to reliably parse table/lists
-            html_content = markdown.markdown(md_content, extensions=['tables', 'extra'])
-            soup = BeautifulSoup(html_content, 'html.parser')
-
-            # Try parsing a table first (assuming table has vendor name in first column)
-            table = soup.find('table')
-            if table:
-                rows = table.find_all('tr')
-                if len(rows) > 1: # Check if there are data rows beyond header
-                    for row in rows[1:]: # Skip header row
-                        first_cell = row.find(['td', 'th']) # Find first cell (th for header, td for data)
-                        if first_cell:
-                            vendor_name = first_cell.get_text(strip=True)
-                            if vendor_name and not vendor_name.startswith('[') and not vendor_name.endswith(']'): # Avoid template placeholders
-                                 initial_vendors.append(vendor_name)
-                    logger.info(f"Parsed {len(initial_vendors)} vendors from table.")
-
-            # If no table or no vendors found in table, try parsing bullet points
+            if initial_vendors:
+                logger.info(f"Successfully parsed {len(initial_vendors)} vendors from VENDOR_LIST_START/END structured format")
+        
+        # --- FALLBACK PARSING METHODS (if structured format fails) ---
+        if not structured_format_found or not initial_vendors:
+            logger.warning("Could not find VENDOR_LIST_START/END format or no vendors extracted. Trying alternative formats...")
+            
+            # Try other structured formats (YAML, code blocks)
+            alternative_patterns = [
+                r"```yaml\s*\n(.*?)\s*```",
+                r"```\s*\n(.*?)\s*```",
+                r"VENDORS:\s*\n(.*?)(?:\n\n|\n#|\n\*\*|$)"
+            ]
+            
+            for pattern in alternative_patterns:
+                if initial_vendors: 
+                    break  # Stop if we've already found vendors
+                    
+                match = re.search(pattern, md_content, re.DOTALL)
+                if match:
+                    vendor_list_text = match.group(1).strip()
+                    vendor_lines = [line.strip() for line in vendor_list_text.split('\n')]
+                    for line in vendor_lines:
+                        if line.startswith('-') or line.startswith('*'):
+                            vendor_name = line[1:].strip()
+                            if vendor_name and not vendor_name.startswith('[') and not vendor_name.endswith('...]'):
+                                initial_vendors.append(vendor_name)
+                    
+                    if initial_vendors:
+                        logger.info(f"Parsed {len(initial_vendors)} vendors from alternative structured format: {pattern}")
+            
+            # Only proceed to more complex parsing if still no vendors found
             if not initial_vendors:
-                 logger.info("No table found or no vendors parsed from table, trying bullet points...")
-                 # Look for list items (ul/ol -> li)
-                 lists = soup.find_all(['ul', 'ol'])
-                 for lst in lists:
-                      items = lst.find_all('li')
-                      for item in items:
-                           # Assume vendor name is the main text of the list item
-                           vendor_name = item.get_text(strip=True).split('\n')[0] # Get first line roughly
-                           # Basic filtering to avoid generic list items
-                           if vendor_name and len(vendor_name) > 2 and not vendor_name.lower().startswith(("note:", "source:", "e.g.")):
-                               initial_vendors.append(vendor_name.strip())
-                 logger.info(f"Parsed {len(initial_vendors)} potential vendors from lists.")
+                logger.warning("No vendors found in any structured format. Attempting HTML parsing...")
+                
+                # Convert markdown to HTML for more reliable parsing
+                html_content = markdown.markdown(md_content, extensions=['tables', 'extra'])
+                soup = BeautifulSoup(html_content, 'html.parser')
+    
+                # Try parsing from a table first
+                table = soup.find('table')
+                if table:
+                    rows = table.find_all('tr')
+                    if len(rows) > 1: # Has data rows beyond header
+                        for row in rows[1:]: # Skip header
+                            first_cell = row.find(['td', 'th'])
+                            if first_cell:
+                                vendor_name = first_cell.get_text(strip=True)
+                                if vendor_name and not vendor_name.startswith('[') and not vendor_name.endswith(']'):
+                                     initial_vendors.append(vendor_name)
+                        logger.info(f"Parsed {len(initial_vendors)} vendors from HTML table")
+    
+                # If no vendors from table, try bullet lists
+                if not initial_vendors:
+                    lists = soup.find_all(['ul', 'ol'])
+                    for lst in lists:
+                        items = lst.find_all('li')
+                        for item in items:
+                            vendor_name = item.get_text(strip=True).split('\n')[0]
+                            # Basic filtering to avoid non-vendor items
+                            if vendor_name and len(vendor_name) > 2 and not vendor_name.lower().startswith(("note:", "source:", "e.g.")):
+                                initial_vendors.append(vendor_name.strip())
+                    
+                    if initial_vendors:
+                        logger.info(f"Parsed {len(initial_vendors)} vendors from HTML lists")
                  
-            # If still no vendors found, try a more aggressive approach with headings and paragraphs
-            if not initial_vendors:
-                logger.info("No vendors found in structured elements, trying aggressive text extraction...")
-                # Look for common section titles that might contain vendor lists
-                vendor_section_headings = ["identified vendors", "key vendors", "major vendors", "vendor list", "potential vendors"]
-                
-                # Find all headings (h1-h6)
-                headings = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
-                for heading in headings:
-                    heading_text = heading.get_text().lower()
-                    if any(section in heading_text for section in vendor_section_headings):
-                        # Found a likely vendor section heading, try to extract vendor names from following paragraphs/lists
-                        next_el = heading.find_next(['p', 'ul', 'ol'])
-                        while next_el and next_el.name not in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
-                            if next_el.name == 'p':
-                                # Split paragraph by commas, semicolons, and "and"
-                                text = next_el.get_text()
-                                for candidate in re.split(r'[,;]\s*|\s+and\s+|\s*\n\s*', text):
-                                    candidate = candidate.strip()
-                                    if candidate and len(candidate) > 2 and candidate[0].isupper():
-                                        # Basic filtering: non-empty, reasonable length, starts with uppercase
-                                        initial_vendors.append(candidate)
-                            # Move to next element
-                            next_el = next_el.find_next()
-                
-                if initial_vendors:
-                    logger.info(f"Extracted {len(initial_vendors)} potential vendors using aggressive text parsing.")
+                # Last resort: aggressive heading-based extraction
+                if not initial_vendors:
+                    logger.warning("No vendors found in structured elements. Attempting aggressive text extraction...")
+                    vendor_section_headings = ["identified vendors", "key vendors", "major vendors", "vendor list", "potential vendors"]
+                    
+                    headings = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+                    for heading in headings:
+                        heading_text = heading.get_text().lower()
+                        if any(section in heading_text for section in vendor_section_headings):
+                            next_el = heading.find_next(['p', 'ul', 'ol'])
+                            while next_el and next_el.name not in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+                                if next_el.name == 'p':
+                                    text = next_el.get_text()
+                                    for candidate in re.split(r'[,;]\s*|\s+and\s+|\s*\n\s*', text):
+                                        candidate = candidate.strip()
+                                        if candidate and len(candidate) > 2 and candidate[0].isupper():
+                                            initial_vendors.append(candidate)
+                                next_el = next_el.find_next()
+                    
+                    if initial_vendors:
+                        logger.warning(f"Extracted {len(initial_vendors)} potential vendors using aggressive text parsing - verify results")
 
-        # Basic deduplication and cleanup
-        # Remove any placeholder text that might have been parsed
-        initial_vendors = [v for v in initial_vendors if not v.startswith('[') and not v.endswith(']') and v.strip() != '...']
+        # --- Post-processing for all parsing methods ---
+        # Clean up vendor names
+        if initial_vendors:
+            # Remove any placeholder text
+            initial_vendors = [v for v in initial_vendors if not v.startswith('[') and not v.endswith(']') and v.strip() != '...']
+            
+            # Remove citation markers and parenthetical notes
+            initial_vendors = [re.sub(r'\s*\[\w+\d*\]', '', v) for v in initial_vendors]  # [SS1], [1], etc.
+            initial_vendors = [re.sub(r'\s*\([^)]*\)', '', v) for v in initial_vendors]   # (notes)
+            
+            # Sort and deduplicate
+            initial_vendors = sorted(list(set(initial_vendors)))
+            logger.info(f"Final cleaned vendor list: {initial_vendors}")
         
-        # Additional cleanup: remove citation markers, parenthetical notes
-        initial_vendors = [re.sub(r'\s*\[\w+\d*\]', '', v) for v in initial_vendors]  # Remove citation markers like [SS1]
-        initial_vendors = [re.sub(r'\s*\([^)]*\)', '', v) for v in initial_vendors]   # Remove parenthetical notes
-        
-        # Sort and deduplicate
-        initial_vendors = sorted(list(set(initial_vendors)))
-
         if not initial_vendors:
-            logger.error("Could not parse any vendors from the identification file.")
+            logger.error("Could not parse any vendors using any method. Check the vendor identification file format.")
             return None
-
-        logger.info(f"Initial vendor list parsed: {initial_vendors}")
 
     except Exception as e:
         logger.error(f"Error parsing vendor list from {vendor_id_section_file}: {e}")
@@ -936,68 +947,68 @@ def filter_vendors_based_on_answers(
             user_answers=answers
         )
 
-        # Blocking call for filtering
-        response = client.generate_content(
-            model=LLM_MODEL, # Or maybe a faster model?
-            contents=[types.Content(role="user", parts=[types.Part.from_text(text=filter_prompt)])],
-            generation_config=types.GenerateContentConfig(temperature=0.3) # Low temp for factual filtering
+        # Use updated method to get filtered vendors
+        contents = [types.Content(role="user", parts=[types.Part.from_text(text=filter_prompt)])]
+        generate_content_config = types.GenerateContentConfig(
+            temperature=0.3  # Low temp for factual filtering
         )
 
-        if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
-            raw_filtered_text = "".join(part.text for part in response.candidates[0].content.parts if hasattr(part, 'text'))
+        # Use streaming to get the complete response
+        raw_filtered_text = ""
+        for chunk in client.models.generate_content_stream(
+            model=LLM_MODEL,
+            contents=contents,
+            config=generate_content_config,
+        ):
+            if chunk.text is not None:
+                raw_filtered_text += chunk.text
             
-            # Check for the NO_MATCHING_VENDORS signal
-            if "NO_MATCHING_VENDORS" in raw_filtered_text:
-                filtered_vendors = []
-                logger.info("LLM indicated no matching vendors based on user criteria.")
-            else:
-                # Try to parse the structured format first
-                structured_pattern = r"FILTERED_VENDORS_START\s*\n(.*?)\s*FILTERED_VENDORS_END"
-                structured_match = re.search(structured_pattern, raw_filtered_text, re.DOTALL)
-                
-                if structured_match:
-                    # Parse the structured format
-                    vendor_list_text = structured_match.group(1).strip()
-                    filtered_vendors = [line.strip() for line in vendor_list_text.split('\n') if line.strip() and not line.strip().startswith('[') and not line.strip() == '...']
-                    logger.info(f"Parsed {len(filtered_vendors)} vendors from structured format.")
-                else:
-                    # Fall back to parsing line by line if the structured format is not found
-                    logger.warning("Structured format not found in LLM response, falling back to line-by-line parsing.")
-                    filtered_vendors = [line.strip() for line in raw_filtered_text.strip().split('\n') if line.strip()]
-                
-                # Apply normalized verification regardless of parsing method
-                verified_filtered = []
-                for v in filtered_vendors:
-                    # Normalize vendor names for better matching
-                    normalized_v = v.lower().replace("inc.", "").replace("ltd.", "").replace("corporation", "").replace("corp.", "").strip()
-                    
-                    # Check if this vendor matches any in the initial list using the normalized comparison
-                    matched = False
-                    for initial_vendor in initial_vendors:
-                        normalized_initial = initial_vendor.lower().replace("inc.", "").replace("ltd.", "").replace("corporation", "").replace("corp.", "").strip()
-                        
-                        # Check two forms of containment (to handle shortened names like "Google" vs "Google Cloud")
-                        if normalized_v in normalized_initial or normalized_initial in normalized_v:
-                            # Found a match - add the original name from the initial_vendors list for consistency
-                            verified_filtered.append(initial_vendor)
-                            matched = True
-                            break
-                    
-                    # If no match found, log warning
-                    if not matched:
-                        logger.warning(f"Vendor '{v}' suggested by LLM doesn't match any initial vendor. Excluding.")
-                
-                if len(verified_filtered) != len(filtered_vendors):
-                    logger.warning(f"LLM returned {len(filtered_vendors)} vendors but only {len(verified_filtered)} matched the initial list.")
-                    filtered_vendors = verified_filtered
-
-            logger.info(f"Final filtered vendor list: {filtered_vendors}")
+        # Check for the NO_MATCHING_VENDORS signal
+        if "NO_MATCHING_VENDORS" in raw_filtered_text:
+            filtered_vendors = []
+            logger.info("LLM indicated no matching vendors based on user criteria.")
         else:
-            logger.error("LLM failed to return a filtered vendor list.")
-            if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
-                 logger.error(f"Reason: {response.prompt_feedback.block_reason}")
-            filtered_vendors = None # Indicate failure
+            # Try to parse the structured format first
+            structured_pattern = r"FILTERED_VENDORS_START\s*\n(.*?)\s*FILTERED_VENDORS_END"
+            structured_match = re.search(structured_pattern, raw_filtered_text, re.DOTALL)
+            
+            if structured_match:
+                # Parse the structured format
+                vendor_list_text = structured_match.group(1).strip()
+                filtered_vendors = [line.strip() for line in vendor_list_text.split('\n') if line.strip() and not line.strip().startswith('[') and not line.strip() == '...']
+                logger.info(f"Parsed {len(filtered_vendors)} vendors from structured format.")
+            else:
+                # Fall back to parsing line by line if the structured format is not found
+                logger.warning("Structured format not found in LLM response, falling back to line-by-line parsing.")
+                filtered_vendors = [line.strip() for line in raw_filtered_text.strip().split('\n') if line.strip()]
+                
+            # Apply normalized verification regardless of parsing method
+            verified_filtered = []
+            for v in filtered_vendors:
+                # Normalize vendor names for better matching
+                normalized_v = v.lower().replace("inc.", "").replace("ltd.", "").replace("corporation", "").replace("corp.", "").strip()
+                
+                # Check if this vendor matches any in the initial list using the normalized comparison
+                matched = False
+                for initial_vendor in initial_vendors:
+                    normalized_initial = initial_vendor.lower().replace("inc.", "").replace("ltd.", "").replace("corporation", "").replace("corp.", "").strip()
+                    
+                    # Check two forms of containment (to handle shortened names like "Google" vs "Google Cloud")
+                    if normalized_v in normalized_initial or normalized_initial in normalized_v:
+                        # Found a match - add the original name from the initial_vendors list for consistency
+                        verified_filtered.append(initial_vendor)
+                        matched = True
+                        break
+                
+                # If no match found, log warning
+                if not matched:
+                    logger.warning(f"Vendor '{v}' suggested by LLM doesn't match any initial vendor. Excluding.")
+            
+            if len(verified_filtered) != len(filtered_vendors):
+                logger.warning(f"LLM returned {len(filtered_vendors)} vendors but only {len(verified_filtered)} matched the initial list.")
+                filtered_vendors = verified_filtered
 
+        logger.info(f"Final filtered vendor list: {filtered_vendors}")
     except Exception as e:
         logger.error(f"Error calling LLM for vendor filtering: {e}")
         import traceback
@@ -1022,6 +1033,30 @@ def filter_vendors_based_on_answers(
             logger.error(f"Error saving filtered vendor list: {e}")
 
     return filtered_vendors
+
+# --- New Helper Function for gathering content from markdown files ---
+def _gather_markdown_content(
+    base_dir: Path,
+    section_ids: List[str]
+) -> str:
+    """
+    Reads and concatenates content from specified markdown files.
+    Returns the combined content as a string.
+    """
+    markdown_dir = base_dir / "markdown"
+    combined_content = ""
+    
+    for section_id in section_ids:
+        md_path = markdown_dir / f"{section_id}.md"
+        if md_path.exists():
+            try:
+                with open(md_path, 'r', encoding='utf-8') as f:
+                    combined_content += f"\n\n## {section_id.replace('_', ' ').title()}\n\n"
+                    combined_content += f.read()
+            except Exception as e:
+                logger.warning(f"Could not read {md_path} for content gathering: {e}")
+    
+    return combined_content
 
 # --- New Function for Phase 4: Profiles, Comparison, Relevance ---
 def generate_product_report_phase2(
@@ -1094,17 +1129,41 @@ def generate_product_report_phase2(
     else:
         logger.warning("Skipping comparison matrix (no vendors or criteria).")
 
-    # 3. Prepare Relevance & Recommendations Tasks (Need summaries from Phase 2 / Comparison)
-    # For simplicity now, we run them without summaries, they might be less effective
-    # TODO: Enhance later by passing summaries if needed
+    # Gather content from relevant markdown files for summaries
+    market_summary = _gather_markdown_content(
+        base_dir, 
+        ["market_overview", "market_trends", "market_segmentation"]
+    )
+    if not market_summary:
+        market_summary = "[Market Summary from Initial Analysis - Placeholder]"
+        logger.warning("Could not find market summary content, using placeholder.")
+    
+    # For comparison summary, we'll attempt to get it, but will likely only have it AFTER comparison_matrix is generated
+    # So this might be empty for the relevance prompt initially
+    comparison_summary = _gather_markdown_content(base_dir, ["comparison_matrix"])
+    if not comparison_summary:
+        comparison_summary = "[Comparison Summary - Placeholder]"
+        logger.warning("No comparison matrix content found yet, using placeholder.")
+    
+    # Gather all available analysis for the recommendations
+    analysis_sections = [
+        "market_overview", "market_trends", "market_segmentation", 
+        "feature_analysis", "pricing_models", "integration_options"
+    ]
+    analysis_summary = _gather_markdown_content(base_dir, analysis_sections)
+    if not analysis_summary:
+        analysis_summary = "[Combined Analysis Summary - Placeholder]"
+        logger.warning("Could not find analysis content, using placeholder.")
+
+    # 3. Prepare Relevance & Recommendations Tasks with gathered summaries
     tasks_to_run.append((
         "product_relevance",
         product_prompts.get_product_relevance_prompt,
         {
             'product_category': product_category,
-            'market_summary': "[Market Summary from Initial Analysis - Placeholder]", # Placeholder
+            'market_summary': market_summary, 
             'filtered_vendors': filtered_vendors or [],
-            'comparison_summary': "[Comparison Summary - Placeholder]", # Placeholder
+            'comparison_summary': comparison_summary,
             'language': "English",
             'context_company_name': context_company_name,
             **optional_inputs
@@ -1118,7 +1177,7 @@ def generate_product_report_phase2(
              product_prompts.get_product_recommendations_prompt,
              {
                  'product_category': product_category,
-                 'analysis_summary': "[Combined Analysis Summary - Placeholder]", # Placeholder
+                 'analysis_summary': analysis_summary,
                  'language': "English",
                  'context_company_name': context_company_name,
                  **optional_inputs
@@ -1221,10 +1280,11 @@ def trigger_vendor_deep_dives(
     context_company_name: str,
     optional_inputs: Dict, # Original product optional inputs
     progress_context=None
-) -> Dict[str, Tuple[Optional[Dict], Optional[Path], Optional[Dict]]]: # Added dashboard data per vendor
+) -> Dict[str, Tuple[Optional[Dict], Optional[Path], Optional[Dict], Optional[Path]]]: # Added base_dir to return tuple
     """
     Triggers deep dives AND generates individual dashboard data for each.
-    Returns dict {vendor_name: (stats, pdf_path, dashboard_data)}
+    Returns dict {vendor_name: (stats, pdf_path, dashboard_data, base_dir)}
+    The base_dir is returned to help locate the deep dive content for PDF generation.
     """
     global shutdown_requested
     if shutdown_requested: return {}
@@ -1284,15 +1344,23 @@ def trigger_vendor_deep_dives(
                     if not shutdown_requested:
                         # run_vendor_research now returns (stats, pdf, dashboard)
                         token_stats, pdf_path, dashboard_data = future.result()
-                        deep_dive_results[vendor_name] = (token_stats, pdf_path, dashboard_data) # Store all 3
+                        # Store all values plus the base_dir (available in token_stats)
+                        vendor_base_dir = token_stats.get('base_dir') if token_stats else None
+                        deep_dive_results[vendor_name] = (token_stats, pdf_path, dashboard_data, vendor_base_dir)
                         if not progress_bar_external and main_task_dd:
                             progress.update(main_task_dd, advance=1, description=f"Deep Dive Complete: {vendor_name}")
                         logger.info(f"Successfully completed deep dive for vendor: {vendor_name}")
+                        
+                        # Log the base directory to make it easier to find
+                        if vendor_base_dir:
+                            logger.info(f"Vendor {vendor_name} deep dive directory: {vendor_base_dir}")
+                        else:
+                            logger.warning(f"Could not determine base directory for {vendor_name} deep dive")
                     else:
-                        deep_dive_results[vendor_name] = ({"summary": {"was_interrupted": True}}, None, None) # Include placeholder for dashboard
+                        deep_dive_results[vendor_name] = ({"summary": {"was_interrupted": True}}, None, None, None)
                         logger.warning(f"Skipping/Interrupting deep dive for vendor: {vendor_name}")
                 except Exception as e:
-                    deep_dive_results[vendor_name] = ({"summary": {"error": str(e)}}, None, None) # Include placeholder
+                    deep_dive_results[vendor_name] = ({"summary": {"error": str(e)}}, None, None, None)
                     logger.error(f"Error during deep dive for vendor {vendor_name}: {e}")
                     if not progress_bar_external and main_task_dd:
                         progress.update(main_task_dd, description=f"Error in Deep Dive: {vendor_name}")
@@ -1303,8 +1371,22 @@ def trigger_vendor_deep_dives(
         if not progress_bar_external:
             progress.stop()
     
+    # Save the deep dive base directories for future reference
+    try:
+        misc_dir = base_dir / "misc"
+        misc_dir.mkdir(exist_ok=True)
+        with open(misc_dir / "deep_dive_directories.json", 'w', encoding='utf-8') as f:
+            # Create a mapping of vendor names to their base directories
+            vendor_dirs = {
+                vendor: str(results[3]) if results[3] else None
+                for vendor, results in deep_dive_results.items()
+            }
+            json.dump(vendor_dirs, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.warning(f"Could not save deep dive directories mapping: {e}")
+    
     # Summarize results
-    success_count = sum(1 for v, (stats, _, _) in deep_dive_results.items() 
+    success_count = sum(1 for v, (stats, _, _, _) in deep_dive_results.items() 
                       if stats and stats.get('summary', {}).get('successful_sections', 0) > 0)
     console.print(f"[green]Deep Dive Research Complete. {success_count} of {len(vendors_to_research)} vendors processed successfully.[/green]")
     
@@ -1328,6 +1410,23 @@ def generate_final_product_report(
     final_dashboard_data = None
 
     try:
+        # Get deep dive directories from saved mapping if it exists
+        deep_dive_dirs = {}
+        deep_dive_dirs_path = base_dir / "misc" / "deep_dive_directories.json"
+        if deep_dive_dirs_path.exists():
+            try:
+                with open(deep_dive_dirs_path, 'r', encoding='utf-8') as f:
+                    deep_dive_dirs = json.load(f)
+                console.print(f"[green]Loaded deep dive directory mapping for {len(deep_dive_dirs)} vendors.[/green]")
+            except Exception as e:
+                logger.warning(f"Could not load deep dive directories mapping: {e}")
+        else:
+            logger.warning("Deep dive directories mapping file not found. Some content might be missing from the final PDF.")
+            
+        # Check if we have any deep dive directories to use
+        if deep_dive_vendors and not deep_dive_dirs:
+            logger.warning("Deep dive vendors specified but no directory mapping found.")
+        
         # Generate the final PDF using the full section order
         pdf_path_generated = process_markdown_files(
             base_dir=base_dir,
@@ -1335,7 +1434,8 @@ def generate_final_product_report(
             report_type_name="ProductReportFull", # Use a distinct name
             section_order=PRODUCT_FULL_SECTION_ORDER, # Use the full order
             filtered_vendors=filtered_vendors,
-            deep_dive_vendors=deep_dive_vendors
+            deep_dive_vendors=deep_dive_vendors,
+            deep_dive_dirs=deep_dive_dirs # Pass the directory mapping to find vendor content
         )
         if pdf_path_generated and pdf_path_generated.exists():
             final_pdf_path = pdf_path_generated
@@ -1432,23 +1532,27 @@ def _generate_dashboard_data(
     try:
         summary_prompt = summary_prompt_func(**summary_prompt_args)
 
-        # Call LLM for summary
+        # Call LLM for summary using the updated API
         api_key = os.getenv("GEMINI_API_KEY")
         client = genai.Client(api_key=api_key)
-        response = client.generate_content(
-            model=LLM_MODEL, # Consider a faster/cheaper model? e.g., gemini-1.5-flash
-            contents=[types.Content(role="user", parts=[types.Part.from_text(text=summary_prompt)])],
-            # IMPORTANT: Request JSON output if model supports it (e.g., Gemini 1.5 Pro+)
-            # generation_config=types.GenerateContentConfig(
-            #     temperature=0.1, # Low temp for factual extraction
-            #     response_mime_type="application/json"
-            # )
-            # Fallback for models not supporting JSON mode directly:
-             generation_config=types.GenerateContentConfig(temperature=0.1)
+        
+        contents = [types.Content(role="user", parts=[types.Part.from_text(text=summary_prompt)])]
+        generate_content_config = types.GenerateContentConfig(
+            temperature=0.1,  # Low temp for factual extraction
+            response_mime_type="text/plain",
         )
-
-        if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
-            raw_json_text = "".join(part.text for part in response.candidates[0].content.parts)
+        
+        # Use streaming to get complete response
+        raw_json_text = ""
+        try:
+            for chunk in client.models.generate_content_stream(
+                model=LLM_MODEL,
+                contents=contents,
+                config=generate_content_config,
+            ):
+                if chunk.text is not None:
+                    raw_json_text += chunk.text
+                    
             # Clean potential markdown fences
             cleaned_json_text = re.sub(r"```(json)?|\s*```", "", raw_json_text, flags=re.IGNORECASE).strip()
             try:
@@ -1478,36 +1582,111 @@ Your previous response had JSON parsing errors. Return ONLY valid JSON following
 
 IMPORTANT: Return ONLY the JSON object, with no additional text, markdown formatting, or code block syntax.
 """
-                    retry_response = client.generate_content(
-                        model=LLM_MODEL,
-                        contents=[types.Content(role="user", parts=[types.Part.from_text(text=retry_prompt)])],
-                        generation_config=types.GenerateContentConfig(temperature=0.1)
-                    )
+                    # Use updated API for retry
+                    retry_contents = [types.Content(role="user", parts=[types.Part.from_text(text=retry_prompt)])]
+                    retry_config = types.GenerateContentConfig(temperature=0.1)
                     
-                    if retry_response.candidates and retry_response.candidates[0].content and retry_response.candidates[0].content.parts:
-                        retry_text = "".join(part.text for part in retry_response.candidates[0].content.parts)
-                        # Extra cleaning for the retry attempt
-                        retry_text = re.sub(r"```(json)?|\s*```", "", retry_text, flags=re.IGNORECASE).strip()
-                        dashboard_data = json.loads(retry_text)
-                        logger.info("Successfully parsed dashboard JSON data on retry attempt.")
-                    else:
-                        raise Exception("Retry attempt failed to generate a response")
-                        
+                    # Use streaming to get retry response
+                    retry_text = ""
+                    for chunk in client.models.generate_content_stream(
+                        model=LLM_MODEL,
+                        contents=retry_contents,
+                        config=retry_config,
+                    ):
+                        if chunk.text is not None:
+                            retry_text += chunk.text
+                    
+                    # Extra cleaning for the retry attempt
+                    retry_text = re.sub(r"```(json)?|\s*```", "", retry_text, flags=re.IGNORECASE).strip()
+                    dashboard_data = json.loads(retry_text)
+                    logger.info("Successfully parsed dashboard JSON data on retry attempt.")
+                    
                 except Exception as retry_e:
                     logger.error(f"Retry attempt also failed: {retry_e}")
                     dashboard_data = {
                         "error": "Failed to parse summary JSON after retry", 
                         "raw_response": raw_json_text
                     }
-        else:
-            logger.error("LLM failed to generate dashboard summary.")
-            if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
-                logger.error(f"Reason: {response.prompt_feedback.block_reason}")
-            dashboard_data = {"error": "LLM failed to generate summary"}
+        except Exception as e:
+            logger.error(f"Error generating dashboard content: {str(e)}")
+            dashboard_data = {"error": f"Exception during dashboard generation: {str(e)}"}
 
     except Exception as e:
         logger.error(f"Error during dashboard data generation: {e}")
         dashboard_data = {"error": f"Exception during summary generation: {str(e)}"}
+
+    # Validate and fill in missing values with defaults
+    if dashboard_data and 'error' not in dashboard_data:
+        try:
+            # Define expected keys for each mode
+            if research_mode == 'vendor':
+                expected_keys = [
+                    "financial_stability_assessment", "operational_risk_assessment", 
+                    "compliance_risk_assessment", "key_compliance_checks", 
+                    "top_3_risks", "overall_suitability"
+                ]
+                # Ensure expected keys exist with defaults for vendor mode
+                for key in expected_keys:
+                    if key not in dashboard_data:
+                        if key in ["key_compliance_checks"]:
+                            dashboard_data[key] = {}
+                        elif key in ["top_3_risks"]:
+                            dashboard_data[key] = []
+                        else:
+                            dashboard_data[key] = "N/A"
+                
+            elif research_mode == 'product':
+                expected_keys = [
+                    "identified_vendor_count", "filtered_vendor_count", "market_growth_trend",
+                    "top_3_filtered_vendors", "key_tech_trends", "common_compliance_standards"
+                ]
+                # Ensure expected keys exist with defaults for product mode
+                for key in expected_keys:
+                    if key not in dashboard_data:
+                        if key in ["top_3_filtered_vendors", "key_tech_trends", "common_compliance_standards"]:
+                            dashboard_data[key] = []
+                        elif key in ["identified_vendor_count", "filtered_vendor_count"]:
+                            dashboard_data[key] = 0
+                        else:
+                            dashboard_data[key] = "N/A"
+            
+            # Validate types and convert if needed
+            for key, value in dashboard_data.items():
+                # Convert non-list values to lists where needed
+                if key in ["top_3_risks", "top_3_filtered_vendors", "key_tech_trends", "common_compliance_standards"]:
+                    if not isinstance(value, list):
+                        if value is None:
+                            dashboard_data[key] = []
+                        elif isinstance(value, str):
+                            # Split by commas if it's a single string
+                            dashboard_data[key] = [item.strip() for item in value.split(",") if item.strip()]
+                        else:
+                            # Convert other types to a single-item list
+                            dashboard_data[key] = [str(value)]
+                
+                # Convert dictionaries
+                if key in ["key_compliance_checks"]:
+                    if not isinstance(value, dict):
+                        dashboard_data[key] = {}
+                
+                # Ensure numeric values
+                if key in ["identified_vendor_count", "filtered_vendor_count"]:
+                    if not isinstance(value, int) or value < 0:
+                        try:
+                            dashboard_data[key] = int(value) if value is not None else 0
+                        except (ValueError, TypeError):
+                            dashboard_data[key] = 0
+                
+                # Ensure string values for text fields
+                if key in ["financial_stability_assessment", "operational_risk_assessment", 
+                          "compliance_risk_assessment", "overall_suitability", "market_growth_trend"]:
+                    if not isinstance(value, str) or not value:
+                        dashboard_data[key] = str(value) if value is not None else "N/A"
+            
+            logger.info("Dashboard data validated and defaults applied where needed.")
+        except Exception as e:
+            logger.warning(f"Error during dashboard data validation: {e}")
+            # Don't overwrite the dashboard data if validation fails, just log the error
 
     # Save dashboard data
     if dashboard_data:
@@ -1520,6 +1699,10 @@ IMPORTANT: Return ONLY the JSON object, with no additional text, markdown format
             logger.warning(f"Could not save dashboard data JSON: {e}")
 
     return dashboard_data
+
+# --- Function Aliases for Backward Compatibility ---
+# app.py is importing run_product_research_phase2 but the function is named generate_product_report_phase2
+run_product_research_phase2 = generate_product_report_phase2
 
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)

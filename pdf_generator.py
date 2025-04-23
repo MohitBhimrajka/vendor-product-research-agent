@@ -11,7 +11,7 @@ import yaml
 from bs4 import BeautifulSoup, Comment
 import re
 from typing import Optional, Dict, List, Tuple, Any
-from config import SECTION_ORDER, PDF_CONFIG
+from config import PDF_CONFIG
 from pydantic import BaseModel
 
 class PDFSection(BaseModel):
@@ -1093,7 +1093,8 @@ def process_markdown_files(
     stages: Optional[List[str]] = None,
     stage_dirs: Optional[Dict[str, Path]] = None,
     filtered_vendors: Optional[List[str]] = None,  # Added for product reports
-    deep_dive_vendors: Optional[List[str]] = None  # Added for final product reports
+    deep_dive_vendors: Optional[List[str]] = None,  # Added for final product reports
+    deep_dive_dirs: Optional[Dict[str, str]] = None  # Mapping of vendor names to their deep dive base dirs
 ) -> Optional[Path]:
     """
     Process markdown files based on a given section order and generate a PDF.
@@ -1108,6 +1109,7 @@ def process_markdown_files(
         stage_dirs: Dictionary mapping stage names to directory paths, if stages are in different locations
         filtered_vendors: List of filtered vendors for product reports
         deep_dive_vendors: List of vendors for which deep dives were executed
+        deep_dive_dirs: Mapping of vendor names to their deep dive base directories
         
     Returns:
         Path to the generated PDF or None if no sections were found
@@ -1152,46 +1154,86 @@ def process_markdown_files(
     if deep_dive_vendors and len(deep_dive_vendors) > 0:
         print(f"Processing deep dives for vendors: {deep_dive_vendors}")
         
-        # Look for deep dive directories under the base_dir
+        vendor_section_order = None
+        # Try to import VENDOR_SECTION_ORDER from config for organizing deep dive content
+        try:
+            from config import VENDOR_SECTION_ORDER
+            vendor_section_order = VENDOR_SECTION_ORDER
+            print(f"Using VENDOR_SECTION_ORDER for deep dive content organization")
+        except ImportError:
+            print("Could not import VENDOR_SECTION_ORDER from config, will use alphabetical ordering")
+        
         for vendor_name in deep_dive_vendors:
             # Clean the vendor name for use in directory names
             clean_vendor_name = re.sub(r'[\\/*?:"<>| ]', "_", vendor_name)
-            
-            # Search for a matching deep dive directory
-            # Pattern: base_dir/VendorResearch_VendorName_timestamp, or custom pattern
             deep_dive_dir = None
             
-            # Check potential deep dive directory patterns
-            potential_patterns = [
-                # Common patterns for deep dive directories
-                f"VendorResearch_{clean_vendor_name}_*",  # Standard pattern
-                f"*_{clean_vendor_name}_*",               # Generalized pattern
-                f"*deep*dive*{clean_vendor_name}*",       # Deep dive keyword pattern
-                clean_vendor_name                         # Simple vendor name pattern
-            ]
+            # First try to get the path from the deep_dive_dirs mapping if available
+            if deep_dive_dirs and vendor_name in deep_dive_dirs and deep_dive_dirs[vendor_name]:
+                try:
+                    deep_dive_dir_str = deep_dive_dirs[vendor_name]
+                    deep_dive_dir = Path(deep_dive_dir_str)
+                    if deep_dive_dir.exists() and deep_dive_dir.is_dir():
+                        print(f"Found deep dive directory for {vendor_name} from mapping: {deep_dive_dir}")
+                    else:
+                        print(f"Deep dive directory from mapping does not exist: {deep_dive_dir}")
+                        deep_dive_dir = None
+                except Exception as e:
+                    print(f"Error using deep dive directory from mapping for {vendor_name}: {e}")
+                    deep_dive_dir = None
             
-            # Find the first matching directory
-            for pattern in potential_patterns:
-                matches = list(base_dir.glob(pattern))
-                for match in matches:
-                    if match.is_dir():
-                        deep_dive_dir = match
-                        break
-                if deep_dive_dir:
-                    break
-                    
-            # If no dedicated directory found, try subdirectories of base_dir
+            # If no path from mapping or it doesn't exist, try alternative methods
             if not deep_dive_dir:
-                for subdir in base_dir.iterdir():
-                    if subdir.is_dir() and "deep" in subdir.name.lower():
-                        # Check if this might be a deep dive directory
-                        potential_vendor_dir = subdir / clean_vendor_name
-                        if potential_vendor_dir.exists() and potential_vendor_dir.is_dir():
-                            deep_dive_dir = potential_vendor_dir
+                # Attempt pattern-based discovery
+                print(f"No valid deep dive directory found from mapping for {vendor_name}, trying pattern search...")
+                
+                # Search for a matching deep dive directory
+                # Pattern: base_dir/vendor_VendorName_timestamp, or custom pattern
+                
+                # Check potential deep dive directory patterns
+                potential_patterns = [
+                    f"vendor_{clean_vendor_name}_*",        # Expected pattern
+                    f"VendorResearch_{clean_vendor_name}_*",  # Alternative pattern
+                    f"*_{clean_vendor_name}_*",               # Generalized pattern
+                    f"*deep*dive*{clean_vendor_name}*",       # Deep dive keyword pattern
+                    clean_vendor_name                         # Simple vendor name pattern
+                ]
+                
+                # Find the first matching directory
+                for pattern in potential_patterns:
+                    matches = list(base_dir.glob(pattern))
+                    if not matches:
+                        # Try parent directory if available
+                        parent_dir = base_dir.parent if base_dir.parent != base_dir else None
+                        if parent_dir:
+                            matches = list(parent_dir.glob(pattern))
+                    
+                    for match in matches:
+                        if match.is_dir():
+                            deep_dive_dir = match
+                            print(f"Found deep dive directory for {vendor_name} using pattern '{pattern}': {deep_dive_dir}")
                             break
+                    if deep_dive_dir:
+                        break
+                    
+                # If no dedicated directory found, try subdirectories of base_dir
+                if not deep_dive_dir:
+                    print(f"No pattern match found for {vendor_name}, checking subdirectories...")
+                    for subdir in base_dir.iterdir():
+                        if subdir.is_dir() and any(keyword in subdir.name.lower() for keyword in ["deep", "dive", "vendor", clean_vendor_name.lower()]):
+                            # Check if this might be a deep dive directory
+                            potential_vendor_dir = subdir / clean_vendor_name
+                            if potential_vendor_dir.exists() and potential_vendor_dir.is_dir():
+                                deep_dive_dir = potential_vendor_dir
+                                print(f"Found deep dive directory in subdirectory: {deep_dive_dir}")
+                                break
+                            elif clean_vendor_name.lower() in subdir.name.lower():
+                                deep_dive_dir = subdir
+                                print(f"Found potential deep dive directory by name match: {deep_dive_dir}")
+                                break
             
             if deep_dive_dir:
-                print(f"Found deep dive directory for {vendor_name}: {deep_dive_dir}")
+                print(f"Processing deep dive content for {vendor_name} from {deep_dive_dir}")
                 
                 # Look for the markdown directory within the deep dive directory
                 dd_markdown_dir = deep_dive_dir / "markdown"
@@ -1199,21 +1241,35 @@ def process_markdown_files(
                     # Create a section for this vendor's deep dive
                     dd_section_content = f"# Deep Dive: {vendor_name}\n\n"
                     
-                    # Process all markdown files in the deep dive directory
-                    dd_files = sorted(list(dd_markdown_dir.glob("*.md")))
-                    for dd_file in dd_files:
-                        # Skip potential system or temporary files
-                        if dd_file.name.startswith('.') or dd_file.name.startswith('~'):
-                            continue
-                            
-                        try:
-                            with open(dd_file, 'r', encoding='utf-8') as f:
-                                section_content = f.read().strip()
-                                if section_content:
-                                    section_title = dd_file.stem.replace('_', ' ').title()
-                                    dd_section_content += f"## {section_title}\n\n{section_content}\n\n"
-                        except Exception as e:
-                            print(f"Error reading deep dive file {dd_file}: {e}")
+                    # Process files in order if vendor_section_order is available, otherwise alphabetically
+                    if vendor_section_order:
+                        # Use vendor section order for organized content
+                        for section_id, section_title in vendor_section_order:
+                            dd_file = dd_markdown_dir / f"{section_id}.md"
+                            if dd_file.exists():
+                                try:
+                                    with open(dd_file, 'r', encoding='utf-8') as f:
+                                        section_content = f.read().strip()
+                                        if section_content:
+                                            dd_section_content += f"## {section_title}\n\n{section_content}\n\n"
+                                except Exception as e:
+                                    print(f"Error reading deep dive file {dd_file}: {e}")
+                    else:
+                        # Fallback to alphabetical sorting
+                        dd_files = sorted(list(dd_markdown_dir.glob("*.md")))
+                        for dd_file in dd_files:
+                            # Skip potential system or temporary files
+                            if dd_file.name.startswith('.') or dd_file.name.startswith('~'):
+                                continue
+                                
+                            try:
+                                with open(dd_file, 'r', encoding='utf-8') as f:
+                                    section_content = f.read().strip()
+                                    if section_content:
+                                        section_title = dd_file.stem.replace('_', ' ').title()
+                                        dd_section_content += f"## {section_title}\n\n{section_content}\n\n"
+                            except Exception as e:
+                                print(f"Error reading deep dive file {dd_file}: {e}")
                     
                     # Create a deep dive section for this vendor
                     if dd_section_content.strip() != f"# Deep Dive: {vendor_name}":  # Check if we added content
@@ -1222,6 +1278,7 @@ def process_markdown_files(
                             title=f"Deep Dive: {vendor_name}",
                             content=dd_section_content
                         ))
+                        print(f"Added deep dive section for {vendor_name}")
                     else:
                         print(f"No content found in deep dive markdown files for {vendor_name}")
                 else:
@@ -1232,11 +1289,22 @@ def process_markdown_files(
     # Process each section from the main section order
     for section_id, section_title in section_order:
         # Special handling for vendor deep dives section
-        if section_id == "vendor_deep_dives" and deep_dive_sections:
-            # Add all deep dive sections in place of the placeholder
-            for dd_section in deep_dive_sections:
-                sections.append(dd_section)
-            print(f"Added {len(deep_dive_sections)} deep dive sections")
+        if section_id == "vendor_deep_dives":
+            if deep_dive_sections:
+                # Add all deep dive sections in place of the placeholder
+                sections.extend(deep_dive_sections)
+                print(f"Added {len(deep_dive_sections)} deep dive sections")
+            else:
+                # Add a placeholder section if no deep dive content was found
+                placeholder_content = "# Vendor Deep Dives\n\n"
+                placeholder_content += "No vendor deep dive content was found or specified for this report.\n"
+                
+                sections.append(PDFSection(
+                    id="vendor_deep_dives_placeholder",
+                    title="Vendor Deep Dives",
+                    content=placeholder_content
+                ))
+                print("Added placeholder for vendor deep dives (no content available)")
             continue
             
         section_content = None

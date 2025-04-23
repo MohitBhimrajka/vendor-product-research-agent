@@ -11,7 +11,7 @@ from report_orchestrator import (
     run_vendor_research,
     run_product_research_initial,
     filter_vendors_based_on_answers, # New function import
-    run_product_research_phase2, # Updated function name
+    run_product_research_phase2, # Phase 2 function
     trigger_vendor_deep_dives,     # New import
     generate_final_product_report # New import for final step
 )
@@ -77,6 +77,184 @@ def display_pdf(pdf_path: Path):
             st.error(f"Error displaying PDF: {e}")
     else:
         st.error(f"PDF file not found: {pdf_path}")
+
+# --- Helper Function to Display Dashboard ---
+def display_dashboard(dashboard_data):
+    if not dashboard_data or 'error' in dashboard_data:
+        st.warning(f"Could not display dashboard data. Error: {dashboard_data.get('error', 'Unknown') if dashboard_data else 'No data'}")
+        if dashboard_data and 'raw_response' in dashboard_data:
+             with st.expander("Show Raw Summary Response"):
+                  st.code(dashboard_data['raw_response'], language=None)
+        return
+
+    st.subheader("📊 Dashboard Summary")
+
+    # --- Vendor Dashboard ---
+    if "financial_stability_assessment" in dashboard_data: # Check for vendor keys
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Financial Stability", dashboard_data.get("financial_stability_assessment", "N/A"))
+        col2.metric("Operational Risk", dashboard_data.get("operational_risk_assessment", "N/A"))
+        col3.metric("Compliance Risk", dashboard_data.get("compliance_risk_assessment", "N/A"))
+
+        st.markdown("**Key Compliance Checks:**")
+        compliance_checks = dashboard_data.get("key_compliance_checks", {})
+        if compliance_checks and isinstance(compliance_checks, dict):
+            # Display as table or formatted string
+            compliance_cols = st.columns(min(len(compliance_checks), 4))  # Limit to 4 columns max
+            i = 0
+            for cert, status in compliance_checks.items():
+                 with compliance_cols[i % len(compliance_cols)]:
+                      st.markdown(f"**{cert}:** {status}")
+                 i += 1
+        else:
+            st.markdown("N/A")
+
+        st.markdown("**Top Identified Risks:**")
+        top_risks = dashboard_data.get("top_3_risks", [])
+        if top_risks and isinstance(top_risks, list) and len(top_risks) > 0:
+            for risk in top_risks:
+                if risk:  # Only display non-empty values
+                    st.markdown(f"- {risk}")
+        else:
+            st.markdown("N/A")
+
+        st.metric("Overall Suitability Recommendation", dashboard_data.get("overall_suitability", "N/A"))
+
+    # --- Product Dashboard ---
+    elif "identified_vendor_count" in dashboard_data: # Check for product keys
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Initial Vendors Identified", dashboard_data.get("identified_vendor_count", "N/A"))
+        col2.metric("Vendors After Filtering", dashboard_data.get("filtered_vendor_count", "N/A"))
+        col3.metric("Market Growth Trend", dashboard_data.get("market_growth_trend", "N/A"))
+
+        st.markdown("**Top Filtered Vendors:**")
+        top_vendors = dashboard_data.get("top_3_filtered_vendors", [])
+        if top_vendors and isinstance(top_vendors, list) and len(top_vendors) > 0:
+            vendors_to_display = [v for v in top_vendors if v]  # Filter out empty or None values
+            if vendors_to_display:
+                st.markdown(", ".join([f"**{v}**" for v in vendors_to_display]))
+            else:
+                st.markdown("N/A")
+        else:
+            st.markdown("N/A")
+
+        st.markdown("**Key Technology Trends:**")
+        tech_trends = dashboard_data.get("key_tech_trends", [])
+        if tech_trends and isinstance(tech_trends, list) and len(tech_trends) > 0:
+            for trend in tech_trends:
+                if trend:  # Only display non-empty values
+                    st.markdown(f"- {trend}")
+        else:
+            st.markdown("N/A")
+
+        st.markdown("**Common Compliance Standards:**")
+        comp_standards = dashboard_data.get("common_compliance_standards", [])
+        if comp_standards and isinstance(comp_standards, list) and len(comp_standards) > 0:
+            for std in comp_standards:
+                if std:  # Only display non-empty values
+                    st.markdown(f"- {std}")
+        else:
+            st.markdown("N/A")
+
+    else:
+        st.warning("Unrecognized dashboard data format.")
+        with st.expander("Show Raw Dashboard Data"):
+            st.json(dashboard_data)
+
+# --- Initialize Session State for State Management ---
+if 'current_task' not in st.session_state:
+    st.session_state.current_task = None  # Initial state
+
+# Define all possible states
+# None: Initial state, ready for input
+# generating_vendor_report: Processing vendor report generation
+# vendor_report_completed: Vendor report generation is complete, showing results
+# generating_product_initial: Processing initial product analysis
+# awaiting_filter_input: Waiting for user to answer filtering questions
+# filtering_vendors: Processing filtering based on user answers
+# awaiting_phase2_setup: Showing filtered vendors, waiting for user to select comparison criteria
+# generating_phase2: Processing phase 2 (profiles, comparison, relevance)
+# awaiting_deepdive_selection: Waiting for user to select vendors for deep dive
+# generating_deepdives: Processing deep dive vendor research
+# awaiting_final_pdf: Waiting for user to trigger final PDF generation
+# generating_final_pdf: Processing final PDF generation
+# complete: Final PDF has been generated, showing results
+
+# --- Unified State Management Helper Functions ---
+def is_input_allowed():
+    """Determine if user input should be allowed based on current task"""
+    # Only allow input in specific states
+    input_allowed_states = [None, 'vendor_report_completed', 'awaiting_filter_input', 
+                            'awaiting_phase2_setup', 'awaiting_deepdive_selection', 
+                            'awaiting_final_pdf', 'complete']
+    return st.session_state.current_task in input_allowed_states
+
+def is_product_input_allowed():
+    """Determine if product category input should be allowed"""
+    # Only allow product input in initial state or completed state
+    return st.session_state.current_task in [None, 'complete']
+
+def store_inputs_for_later():
+    """Store current inputs in session state for later use"""
+    # Store context_company_name, optional_inputs and identifiers
+    st.session_state.optional_inputs_storage = {
+        'optional_inputs': optional_inputs.copy(),
+        'context_company_name': context_company_name
+    }
+    
+    # Store identifier based on mode
+    if research_mode == "Product Research":
+        st.session_state.optional_inputs_storage['product_identifier'] = st.session_state.get(identifier_key, "")
+        # Also store in convenient access location
+        st.session_state.product_identifier = st.session_state.get(identifier_key, "")
+    else:  # Vendor Research mode
+        st.session_state.optional_inputs_storage['vendor_identifier'] = st.session_state.get(identifier_key, "")
+        # Also store in convenient access location
+        st.session_state.vendor_name = st.session_state.get(identifier_key, "")
+
+def get_stored_inputs():
+    """Retrieve stored inputs for later stages"""
+    if not st.session_state.optional_inputs_storage:
+        return {}, "", ""
+        
+    stored_inputs = st.session_state.optional_inputs_storage.get('optional_inputs', {})
+    stored_company = st.session_state.optional_inputs_storage.get('context_company_name', '')
+    
+    if research_mode == "Product Research":
+        stored_identifier = st.session_state.optional_inputs_storage.get('product_identifier', '')
+    else:
+        stored_identifier = st.session_state.optional_inputs_storage.get('vendor_identifier', '')
+        
+    return stored_inputs, stored_company, stored_identifier
+
+def reset_state():
+    """Reset all session state variables"""
+    # Keep minimal state but reset task
+    st.session_state.current_task = None
+    
+    # Reset all tracking variables
+    for key in ['report_generated', 'report_summary', 'pdf_path', 'error_message',
+                'vendor_name', 'product_identifier', 'product_base_dir',
+                'filtering_questions', 'filter_messages', 'filtered_vendors',
+                'current_question_index', 'filter_answers', 'selected_comparison_criteria',
+                'phase2_summary', 'phase2_dashboard_data', 'deep_dive_selection',
+                'deep_dive_results', 'final_pdf_path', 'dashboard_data', 'optional_inputs_storage']:
+        if key in st.session_state:
+            if isinstance(st.session_state[key], dict):
+                st.session_state[key] = {}
+            elif isinstance(st.session_state[key], list):
+                st.session_state[key] = []
+            else:
+                st.session_state[key] = None
+    
+    # Reset boolean flags to false
+    for key in ['generation_in_progress', 'product_initial_run_complete', 
+                'filter_answers_submitted', 'filtering_in_progress',
+                'phase2_run_complete', 'phase2_in_progress',
+                'deep_dive_in_progress', 'final_pdf_generated',
+                'final_pdf_in_progress', 'trigger_final_product_report']:
+        if key in st.session_state:
+            st.session_state[key] = False
 
 # --- Initialize Session State ---
 if 'report_generated' not in st.session_state:
@@ -631,6 +809,55 @@ elif research_mode == "Product Research":
         st.subheader("Phase 2 Summary")
         if st.session_state.phase2_dashboard_data: 
             display_dashboard(st.session_state.phase2_dashboard_data) # Display Phase 2 Dashboard
+        
+        # Display Vendor Profiles, Comparison Matrix, and Relevance sections
+        base_dir = Path(st.session_state.product_base_dir)
+        markdown_dir = base_dir / "markdown"
+        
+        if markdown_dir.exists():
+            # Display Vendor Profiles
+            if st.session_state.filtered_vendors:
+                with st.expander("Vendor Profiles", expanded=True):
+                    for vendor in st.session_state.filtered_vendors:
+                        # Create a sanitized filename based on vendor name
+                        sanitized_vendor = re.sub(r'[^a-zA-Z0-9_]', '_', vendor)
+                        profile_path = markdown_dir / f"profile_{sanitized_vendor}.md"
+                        
+                        if profile_path.exists():
+                            try:
+                                with open(profile_path, 'r', encoding='utf-8') as f:
+                                    profile_content = f.read()
+                                st.subheader(f"{vendor}")
+                                st.markdown(profile_content)
+                                st.divider()
+                            except Exception as e:
+                                st.warning(f"Could not read profile for {vendor}: {str(e)}")
+                        else:
+                            st.warning(f"No profile found for {vendor}")
+            
+            # Display Comparison Matrix
+            comparison_path = markdown_dir / "comparison_matrix.md"
+            if comparison_path.exists():
+                with st.expander("Vendor Comparison Matrix", expanded=True):
+                    try:
+                        with open(comparison_path, 'r', encoding='utf-8') as f:
+                            comparison_content = f.read()
+                        st.markdown(comparison_content)
+                    except Exception as e:
+                        st.warning(f"Could not read comparison matrix: {str(e)}")
+            
+            # Display Relevance Analysis
+            relevance_path = markdown_dir / "product_relevance.md"
+            if relevance_path.exists():
+                with st.expander("Relevance & Fit Analysis", expanded=True):
+                    try:
+                        with open(relevance_path, 'r', encoding='utf-8') as f:
+                            relevance_content = f.read()
+                        st.markdown(relevance_content)
+                    except Exception as e:
+                        st.warning(f"Could not read relevance analysis: {str(e)}")
+        else:
+            st.warning(f"Markdown directory not found at {markdown_dir}")
          
         # Deep dive vendor selection
         st.subheader("Vendor Deep Dive Selection (Optional)")
@@ -669,7 +896,48 @@ elif research_mode == "Product Research":
     # Stage 4: Deep Dives Done, Awaiting Final PDF Trigger
     elif st.session_state.deep_dive_results is not None and not st.session_state.final_pdf_generated:
         st.subheader("Deep Dive Results Summary")
-        # Keep existing UI for displaying deep dive summary
+        
+        # Display Deep Dive Results for each vendor
+        if st.session_state.deep_dive_results:
+            for vendor, (stats, pdf_path, dashboard_data, deep_dive_dir) in st.session_state.deep_dive_results.items():
+                with st.expander(f"Deep Dive: {vendor}", expanded=True):
+                    # Display vendor dashboard if available
+                    if dashboard_data and 'error' not in dashboard_data:
+                        st.subheader(f"Dashboard Summary: {vendor}")
+                        display_dashboard(dashboard_data)
+                    
+                    # Display PDF download button if available
+                    if pdf_path and Path(pdf_path).exists():
+                        col_btn, col_spacer = st.columns([1, 3])
+                        with col_btn:
+                            with open(pdf_path, "rb") as file:
+                                st.download_button(
+                                    label=f"Download {vendor} PDF",
+                                    data=file,
+                                    file_name=Path(pdf_path).name,
+                                    mime="application/pdf",
+                                    key=f"download-{vendor}-btn",
+                                    use_container_width=True
+                                )
+                        
+                        # Option to view PDF inline
+                        if st.checkbox(f"View {vendor} PDF inline", key=f"view-{vendor}-pdf"):
+                            display_pdf(Path(pdf_path))
+                    
+                    # Show basic stats
+                    if stats and stats.get('summary'):
+                        summary = stats.get('summary')
+                        stats_col1, stats_col2 = st.columns(2)
+                        with stats_col1:
+                            st.metric("Successful Sections", summary.get("successful_sections", 0))
+                            st.metric("Processing Time", summary.get("formatted_execution_time", "N/A"))
+                        with stats_col2:
+                            st.metric("Total Tokens Used", summary.get("total_tokens", 0))
+                            st.metric("Status", "Complete" if not summary.get("was_interrupted", False) else "Interrupted")
+                    else:
+                        st.warning(f"No stats available for {vendor}")
+        else:
+            st.warning("No deep dive results available")
         
         if st.button("Generate Final Complete PDF Report", disabled=st.session_state.final_pdf_in_progress):
             # Use stored inputs from initial phase
@@ -728,75 +996,3 @@ elif research_mode == "Product Research":
 
 st.divider()
 st.caption("© 2024 Vendor & Product Research Agent")
-
-# --- Helper Function to Display Dashboard ---
-def display_dashboard(dashboard_data):
-    if not dashboard_data or 'error' in dashboard_data:
-        st.warning(f"Could not display dashboard data. Error: {dashboard_data.get('error', 'Unknown') if dashboard_data else 'No data'}")
-        if dashboard_data and 'raw_response' in dashboard_data:
-             with st.expander("Show Raw Summary Response"):
-                  st.code(dashboard_data['raw_response'], language=None)
-        return
-
-    st.subheader("📊 Dashboard Summary")
-
-    # --- Vendor Dashboard ---
-    if "financial_stability_assessment" in dashboard_data: # Check for vendor keys
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Financial Stability", dashboard_data.get("financial_stability_assessment", "N/A"))
-        col2.metric("Operational Risk", dashboard_data.get("operational_risk_assessment", "N/A"))
-        col3.metric("Compliance Risk", dashboard_data.get("compliance_risk_assessment", "N/A"))
-
-        st.markdown("**Key Compliance Checks:**")
-        compliance_checks = dashboard_data.get("key_compliance_checks", {})
-        if compliance_checks:
-            # Display as table or formatted string
-            compliance_cols = st.columns(len(compliance_checks))
-            i = 0
-            for cert, status in compliance_checks.items():
-                 with compliance_cols[i]:
-                      st.markdown(f"**{cert}:** {status}")
-                 i += 1
-        else:
-            st.markdown("N/A")
-
-        st.markdown("**Top Identified Risks:**")
-        top_risks = dashboard_data.get("top_3_risks", [])
-        if top_risks:
-            for risk in top_risks:
-                st.markdown(f"- {risk}")
-        else:
-            st.markdown("N/A")
-
-        st.metric("Overall Suitability Recommendation", dashboard_data.get("overall_suitability", "N/A"))
-
-    # --- Product Dashboard ---
-    elif "identified_vendor_count" in dashboard_data: # Check for product keys
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Initial Vendors Identified", dashboard_data.get("identified_vendor_count", "N/A"))
-        col2.metric("Vendors After Filtering", dashboard_data.get("filtered_vendor_count", "N/A"))
-        col3.metric("Market Growth Trend", dashboard_data.get("market_growth_trend", "N/A"))
-
-        st.markdown("**Top Filtered Vendors:**")
-        top_vendors = dashboard_data.get("top_3_filtered_vendors", [])
-        if top_vendors:
-            st.markdown(", ".join([f"**{v}**" for v in top_vendors]))
-        else:
-            st.markdown("N/A")
-
-        st.markdown("**Key Technology Trends:**")
-        tech_trends = dashboard_data.get("key_tech_trends", [])
-        if tech_trends:
-            for trend in tech_trends: st.markdown(f"- {trend}")
-        else: st.markdown("N/A")
-
-        st.markdown("**Common Compliance Standards:**")
-        comp_standards = dashboard_data.get("common_compliance_standards", [])
-        if comp_standards:
-            for std in comp_standards: st.markdown(f"- {std}")
-        else: st.markdown("N/A")
-
-    else:
-        st.warning("Unrecognized dashboard data format.")
-        with st.expander("Show Raw Dashboard Data"):
-            st.json(dashboard_data)

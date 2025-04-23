@@ -467,7 +467,8 @@ def get_product_vendor_identification_prompt(identifier: str, language: str, con
 {region_context}
 {cert_context}
 
-**IMPORTANT OUTPUT FORMAT:** After completing your full analysis, include a machine-readable list of ONLY the vendor names (without descriptions) following this exact format:
+**CRITICAL OUTPUT REQUIREMENT:**
+You MUST include a machine-readable list of vendor names using the following format:
 
 ```
 VENDOR_LIST_START
@@ -478,7 +479,15 @@ VENDOR_LIST_START
 VENDOR_LIST_END
 ```
 
-This structured format is CRITICAL for automated processing. The list must appear somewhere in your response, exactly as shown, with each vendor on a separate line preceded by "- " (dash and space).
+This structured format is REQUIRED for automated processing and must appear EXACTLY as shown above:
+1. The exact strings "VENDOR_LIST_START" and "VENDOR_LIST_END" must be present
+2. Each vendor name must appear on its own line with "- " (dash and space) prefix
+3. Include ONLY the vendor name in each line (no descriptions or other text)
+4. Do not modify or abbreviate this format in any way
+5. Do not use alternative formats (such as HTML, tables, or other markdown)
+6. This block MUST be included in your final output
+
+The system will fail to properly process vendor names without this exact format.
 
 {instructions['inline_citation']}
 
@@ -573,16 +582,32 @@ def get_filtered_vendor_list_prompt(
 1.  **Interpret User Needs:** Carefully read the user's answers. Identify the key criteria, priorities, constraints, or preferences expressed (e.g., "must have strong AI features", "needs to support enterprise scale", "requires SOC 2 compliance", "prefers vendors with local support in Germany", "looking for cost-effective options").
 2.  **Evaluate Initial Vendors (Conceptual):** Based *only* on general knowledge commonly associated with the vendors in the Initial List and the product category '{product_category}', assess how well each vendor might align with the user's interpreted needs. (You don't have deep vendor data here, rely on common associations - e.g., Salesforce is enterprise-focused, HubSpot often targets SMBs, certain vendors are known for specific features).
 3.  **Filter the List:** Select the vendors from the **Initial Vendor List** that appear to be the *strongest potential matches* based on the user's answers. Prioritize vendors explicitly fitting key requirements.
-4.  **Output Format:** Provide the filtered list of vendor names using the structured format below. If no vendors match, output only "NO_MATCHING_VENDORS".
 
+**CRITICAL OUTPUT REQUIREMENT:**
+You MUST provide the filtered vendors in the following exact structured format:
+
+```
 FILTERED_VENDORS_START
-[Vendor Name 1]
-[Vendor Name 2]
-[Vendor Name 3]
+- Vendor Name 1
+- Vendor Name 2
+- Vendor Name 3
 ...
 FILTERED_VENDORS_END
+```
 
-Important: Use the exact names from the initial vendor list. Do not add any explanation or other text outside the FILTERED_VENDORS_START and FILTERED_VENDORS_END markers.
+This structured format is REQUIRED for automated processing and must appear EXACTLY as shown above:
+1. The exact strings "FILTERED_VENDORS_START" and "FILTERED_VENDORS_END" must be present
+2. Each vendor name must appear on its own line with "- " (dash and space) prefix
+3. Use the exact names from the initial vendor list
+4. Do not add any explanation or rationale in this section
+5. Do not modify or abbreviate this format in any way
+
+If NO vendors match the user's requirements, output ONLY:
+```
+NO_MATCHING_VENDORS
+```
+
+The system will FAIL to process the results properly without this exact format.
 """
     return prompt
 
