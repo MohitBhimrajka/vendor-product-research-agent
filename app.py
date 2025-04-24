@@ -335,7 +335,7 @@ elif st.session_state.state == AppState.AWAITING_FILTER:
             st.session_state.filtered_vendors = []
             st.session_state.state = AppState.AWAITING_PHASE2
             st.rerun()
-
+    
 # Filtering stage - runs the filter on user's answers
 elif st.session_state.state == AppState.FILTERING:
     ui.status_bar()
@@ -442,7 +442,7 @@ elif st.session_state.state == AppState.AWAITING_PHASE2:
                 </div>
                 """, unsafe_allow_html=True)
             with col2:
-                if st.checkbox("", value=default, key=f"criteria_{option}"):
+                if st.checkbox(option, value=default, key=f"criteria_{option}", label_visibility="collapsed"):
                     selected_criteria.append(option)
         
         st.markdown("<br>", unsafe_allow_html=True)
@@ -468,7 +468,7 @@ elif st.session_state.state == AppState.AWAITING_PHASE2:
                 if st.button("Return to questions", key="return_to_filter", use_container_width=True):
                     st.session_state.answers = []  # Reset answers
                     st.session_state.state = AppState.AWAITING_FILTER
-                    st.rerun()
+            st.rerun()
             
             with col2:
                 st.markdown("""
@@ -478,7 +478,6 @@ elif st.session_state.state == AppState.AWAITING_PHASE2:
                 </div>
                 """, unsafe_allow_html=True)
                 if st.button("Select manually", key="skip_to_manual", use_container_width=True):
-                    st.session_state.state = AppState.AWAITING_PHASE2
                     # Retrieve all identified vendors from the product_vendor_identification.md file
                     try:
                         output_dir = Path(st.session_state.product_data_dir)
@@ -501,6 +500,8 @@ elif st.session_state.state == AppState.AWAITING_PHASE2:
                     except Exception as e:
                         st.error(f"Error retrieving vendors: {e}")
                     st.rerun()
+    else:
+        st.info("No vendor identification file found. Please enter vendors manually.")
 
 # Phase 2 generation - profiles and comparison matrix
 elif st.session_state.state == AppState.GENERATING_PHASE2:
@@ -759,8 +760,8 @@ elif st.session_state.state == AppState.AWAITING_FINAL:
                             vendor_markdown_dir = Path(deep_dir) / "markdown"
                             if vendor_markdown_dir.exists():
                                 ui.markdown_tabs(vendor_markdown_dir)
-                            else:
-                                st.warning(f"No markdown content found for {vendor} deep dive.")
+                        else:
+                            st.warning(f"No markdown content found for {vendor} deep dive.")
                     
                     with col2:
                         # PDF download for this vendor's deep dive
@@ -885,11 +886,11 @@ elif st.session_state.state == AppState.COMPLETE:
                 
                 # Create a download button
                 with open(pdf_path, "rb") as f:
-                    st.download_button(
+                     st.download_button(
                         label="📥 Download PDF",
                         data=f,
-                        file_name=pdf_path.name,
-                        mime="application/pdf",
+                         file_name=pdf_path.name, 
+                         mime="application/pdf", 
                         use_container_width=True,
                     )
                 
