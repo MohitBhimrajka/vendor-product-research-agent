@@ -1166,68 +1166,85 @@ def process_markdown_files(
     
     # Add deep dive sections if specified
     if deep_dive_vendors and deep_dive_dirs:
+        # Attempt to import VENDOR_SECTION_ORDER for structuring deep dives
+        try:
+            from config import VENDOR_SECTION_ORDER
+        except ImportError:
+            VENDOR_SECTION_ORDER = None
+            print("Warning: VENDOR_SECTION_ORDER not found in config. Deep dive sections will be ordered alphabetically.")
+
+        # Add a main container section for all deep dives
+        deep_dive_container_added = False
+
         for vendor_name in deep_dive_vendors:
-            # Skip if vendor is not in the deep_dive_dirs mapping
             if vendor_name not in deep_dive_dirs or not deep_dive_dirs[vendor_name]:
                 print(f"Warning: Deep dive directory for vendor {vendor_name} not found in mapping.")
                 continue
-            
-            # Get the base directory for this vendor's deep dive
+
             vendor_dir_str = deep_dive_dirs[vendor_name]
-            if not vendor_dir_str:
-                print(f"Warning: Empty deep dive directory path for vendor {vendor_name}.")
-                continue
-                
             vendor_dir = Path(vendor_dir_str)
             vendor_markdown_dir = vendor_dir / "markdown"
-            
+
             if not vendor_markdown_dir.exists():
                 print(f"Warning: Markdown directory for vendor {vendor_name} not found: {vendor_markdown_dir}")
                 continue
-            
-            # Use a custom section ID/title format for deep dive sections
-            deep_dive_section_id = f"deep_dive_{re.sub(r'[^a-zA-Z0-9_]', '_', vendor_name.lower())}"
-            deep_dive_section_title = f"Deep Dive: {vendor_name}"
-            
-            # Create a temporary concatenated file for this vendor's deep dive content
-            concat_file = markdown_dir / f"{deep_dive_section_id}.md"
-            
-            try:
-                # Gather all markdown files for this vendor, sorted alphabetically
-                vendor_md_files = sorted(vendor_markdown_dir.glob("*.md"))
-                
-                if not vendor_md_files:
-                    print(f"Warning: No markdown files found for vendor {vendor_name} in {vendor_markdown_dir}")
-                    continue
-                
-                # Concatenate all vendor markdown files into a single file with section headers
-                with open(concat_file, 'w', encoding='utf-8') as outfile:
-                    outfile.write(f"# Deep Dive Analysis: {vendor_name}\n\n")
-                    
-                    for md_file in vendor_md_files:
-                        with open(md_file, 'r', encoding='utf-8') as infile:
-                            content = infile.read()
-                            # Add a section header based on the filename
-                            section_name = md_file.stem.replace('_', ' ').title()
-                            outfile.write(f"## {section_name}\n\n")
-                            outfile.write(content)
-                            outfile.write("\n\n")
-                
-                # Read the content from the concatenated file
-                with open(concat_file, 'r', encoding='utf-8') as f:
-                    deep_dive_content = f.read()
-                
-                # Add the concatenated deep dive section with correct field names
-                sections.append(PDFSection(
-                    id=deep_dive_section_id,
-                    title=deep_dive_section_title,
-                    content=deep_dive_content
-                ))
-                    
-            except Exception as e:
-                print(f"Error processing deep dive for vendor {vendor_name}: {e}")
-                import traceback
-                traceback.print_exc()
+
+            # Add the main "Deep Dive: Vendor Name" section header only once
+            if not deep_dive_container_added:
+                 sections.append(PDFSection(
+                      id="vendor_deep_dives_container", # ID for the container
+                      title="Selected Vendor Deep Dives",
+                      content="# Selected Vendor Deep Dives\n\nThis section contains detailed research for selected vendors." # Placeholder content for the container page
+                 ))
+                 deep_dive_container_added = True
+
+
+            # Add a subsection for this specific vendor under the main container
+            vendor_deep_dive_section_id_prefix = f"deep_dive_{re.sub(r'[^a-zA-Z0-9_]', '_', vendor_name.lower())}"
+            vendor_intro_content = f"## Deep Dive: {vendor_name}\n\n" # Start with H2 for vendor name
+
+            # Process sections within this vendor's deep dive based on VENDOR_SECTION_ORDER
+            vendor_sections_content = ""
+            section_files_to_process = []
+
+            if VENDOR_SECTION_ORDER:
+                # Use defined order
+                for dd_section_id, dd_section_title in VENDOR_SECTION_ORDER:
+                    file_path = vendor_markdown_dir / f"{dd_section_id}.md"
+                    if file_path.exists():
+                        section_files_to_process.append((dd_section_id, dd_section_title, file_path))
+                    # else: # Optional: Warn if a file from the order is missing
+                    #     print(f"Debug: Deep dive file missing for {vendor_name}: {file_path.name}")
+            else:
+                # Fallback to alphabetical order
+                sorted_files = sorted(vendor_markdown_dir.glob("*.md"))
+                for file_path in sorted_files:
+                     # Simple title from filename if no order defined
+                     dd_section_id = file_path.stem
+                     dd_section_title = dd_section_id.replace('_', ' ').title()
+                     section_files_to_process.append((dd_section_id, dd_section_title, file_path))
+
+            # Read and add content for each section of this vendor
+            for _, dd_section_title, file_path in section_files_to_process:
+                 try:
+                     with open(file_path, 'r', encoding='utf-8') as f:
+                         content = f.read().strip()
+                         if content:
+                              # Add as H3 subsection under the vendor's H2
+                              vendor_sections_content += f"### {dd_section_title}\n\n{content}\n\n"
+                 except Exception as e:
+                      print(f"Error reading deep dive file {file_path} for {vendor_name}: {e}")
+
+            # Append the combined content for this vendor as a single section in the PDF structure
+            # This section will render with H2 for Vendor Name and H3s for subsections
+            if vendor_sections_content:
+                 sections.append(PDFSection(
+                     id=f"{vendor_deep_dive_section_id_prefix}_content",
+                     title=f"Deep Dive: {vendor_name}", # Title for TOC
+                     content=vendor_intro_content + vendor_sections_content # Combine intro H2 + subsections H3s
+                 ))
+            else:
+                 print(f"Warning: No content found in deep dive markdown files for {vendor_name}")
     
     # Configure and initialize the PDF generator
     template_path = str(Path(__file__).parent / "templates" / "enhanced_report_template.html")

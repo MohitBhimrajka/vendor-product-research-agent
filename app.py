@@ -634,7 +634,7 @@ if st.session_state.current_task == "filtering_vendors" or \
          st.rerun() # Update UI with filtering results
 
 # --- Phase 2 Execution Block (Vendor Comparison Matrix, etc.) ---
-if st.session_state.phase2_in_progress:
+if st.session_state.current_task == "generating_phase2":
     st.header("⚙️ Generating Profiles, Comparison & Recommendations...")
     try:
         success = False
@@ -667,15 +667,18 @@ if st.session_state.phase2_in_progress:
         print(f"Phase 2 Error: {traceback.format_exc()}")
         success = False
     finally:
-        st.session_state.phase2_in_progress = False
-        # UI feedback
+        # --- ADD STATE TRANSITION ---
+        st.session_state.phase2_in_progress = False # Reset legacy flag
         if success:
             st.success("Phase 2 completed successfully!")
+            st.session_state.phase2_run_complete = True # Set legacy completion flag
+            st.session_state.current_task = "awaiting_deepdive_selection" # Transition state
         else:
             st.error("Phase 2 processing encountered an error.")
-        # Remove delay to maximize throughput
-        # time.sleep(1) # Brief delay for feedback
+            # Revert state on error
+            st.session_state.current_task = "displaying_filtered_results" # Go back to comparison setup
         st.rerun()
+        # --- END STATE TRANSITION ---
 
 # --- Deep Dive Execution Block ---
 if st.session_state.current_task == "generating_deepdives": # Check if task is deep dive generation
@@ -723,7 +726,8 @@ if st.session_state.current_task == "generating_deepdives": # Check if task is d
 if 'trigger_final_product_report' not in st.session_state:
     st.session_state.trigger_final_product_report = False
 
-if st.session_state.trigger_final_product_report:
+# if st.session_state.trigger_final_product_report: # OLD Check
+if st.session_state.current_task == "generating_final_pdf": # NEW Check
      st.header("⚙️ Generating Final Report & Dashboard...")
      st.session_state.error_message = None
      success = False
@@ -759,9 +763,18 @@ if st.session_state.trigger_final_product_report:
           print(f"Final Report Error: {traceback.format_exc()}")
           success = False
      finally:
-          st.session_state.trigger_final_product_report = False # Reset trigger
-          if success: st.success("Final combined report and dashboard generated!")
+          # st.session_state.trigger_final_product_report = False # No longer needed
+          # --- ADD STATE TRANSITION ---
+          if success:
+              st.success("Final combined report and dashboard generated!")
+              st.session_state.final_pdf_generated = True # Set legacy flag
+              st.session_state.current_task = "complete" # Transition state
+          else:
+              st.error("Final report generation encountered an error.")
+              # Revert state on error
+              st.session_state.current_task = "awaiting_final_pdf"
           st.rerun()
+          # --- END STATE TRANSITION ---
 
 # --- Display Area ---
 st.header("📊 Research Results & Next Steps")
@@ -929,8 +942,8 @@ elif research_mode == "Product Research":
                   st.error(f"Filtering Error: {st.session_state.error_message}")
 
     # Stage 3: Phase 2 Done, Display Intermediate Results, Awaiting Deep Dive Trigger
-    elif st.session_state.phase2_run_complete and not st.session_state.deep_dive_in_progress and not st.session_state.final_pdf_generated:
-        st.subheader("Phase 2 Summary")
+    elif st.session_state.current_task == "awaiting_deepdive_selection":
+        st.subheader("Phase 2 Results: Profiles & Comparison")
         if st.session_state.phase2_dashboard_data: 
             display_dashboard(st.session_state.phase2_dashboard_data) # Display Phase 2 Dashboard
         
@@ -1015,7 +1028,8 @@ elif research_mode == "Product Research":
         # Add trigger for final PDF if NO deep dives are selected
         if not vendors_for_deep_dive:
             if st.button("Generate Final Report (No Deep Dives)", key="generate_final_pdf_no_dd"):
-                st.session_state.trigger_final_product_report = True
+                st.session_state.current_task = "generating_final_pdf"
+                st.session_state.error_message = None
                 st.rerun()
 
     # Stage 4: Deep Dives Done, Awaiting Final PDF Trigger
@@ -1096,33 +1110,33 @@ elif research_mode == "Product Research":
             st.rerun()
 
     # Stage 5: Final PDF Generated
-    elif st.session_state.final_pdf_generated:
-        st.subheader("Final Combined Product Report")
-        if st.session_state.dashboard_data: 
-            display_dashboard(st.session_state.dashboard_data) # Display FINAL dashboard
-            
-        st.divider()
-        if st.session_state.final_pdf_path and Path(st.session_state.final_pdf_path).exists():
-            # Display final PDF download & preview
-            pdf_path = Path(st.session_state.final_pdf_path)
-            col_btn, col_spacer = st.columns([1, 3])
-            with col_btn:
-                with open(pdf_path, "rb") as file:
-                    st.download_button(
-                        label="Download Final PDF", 
-                        data=file, 
-                        file_name=pdf_path.name, 
-                        mime="application/pdf", 
-                        key="download-final-pdf-button", 
-                        use_container_width=True
-                    )
-            st.info(f"Final report saved to: {pdf_path.relative_to(Path.cwd()) if pdf_path.is_relative_to(Path.cwd()) else pdf_path}")
-            with st.container():
-                st.markdown('<div class="report-container">', unsafe_allow_html=True)
-                display_pdf(pdf_path)
-                st.markdown('</div>', unsafe_allow_html=True)
-        else:
-            st.error("Final PDF generated but path is invalid or file not found.")
+    elif st.session_state.current_task == "complete": # NEW Check
+         st.subheader("Final Combined Product Report")
+         if st.session_state.dashboard_data: 
+             display_dashboard(st.session_state.dashboard_data) # Display FINAL dashboard
+             
+         st.divider()
+         if st.session_state.final_pdf_path and Path(st.session_state.final_pdf_path).exists():
+             # Display final PDF download & preview
+             pdf_path = Path(st.session_state.final_pdf_path)
+             col_btn, col_spacer = st.columns([1, 3])
+             with col_btn:
+                 with open(pdf_path, "rb") as file:
+                     st.download_button(
+                         label="Download Final PDF", 
+                         data=file, 
+                         file_name=pdf_path.name, 
+                         mime="application/pdf", 
+                         key="download-final-pdf-button", 
+                         use_container_width=True
+                     )
+             st.info(f"Final report saved to: {pdf_path.relative_to(Path.cwd()) if pdf_path.is_relative_to(Path.cwd()) else pdf_path}")
+             with st.container():
+                 st.markdown('<div class="report-container">', unsafe_allow_html=True)
+                 display_pdf(pdf_path)
+                 st.markdown('</div>', unsafe_allow_html=True)
+         else:
+             st.error("Final PDF generated but path is invalid or file not found.")
 
     # Handle initial state or errors before initial analysis
     elif st.session_state.error_message:

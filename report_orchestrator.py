@@ -281,33 +281,58 @@ def _generate_report_sections(
                 results[section_id] = {"status": "error", "error": f"Error preparing prompt: {str(e)}", "execution_time": 0}
                 progress.update(section_tasks[section_id], description=f"[red]{section_id:.<30}✗ (Prompt Error)", completed=1)
 
+        logger.info(f"Submitted {len(futures)} sections for generation.") # Log submission
+
+        # --- MODIFICATION: Collect results first, then update progress ---
+        temp_results = {}
         processed_count = 0
+        logger.info("Waiting for section generation results...")
         for future in as_completed(futures):
             section_id = futures[future]
             try:
-                if not shutdown_requested: # Check again in case it was set while task ran
-                    result = future.result()
-                    results[section_id] = result
-                    status_char = "✓" if result['status'] == 'success' else "✗"
-                    color = "green" if result['status'] == 'success' else "red"
-                    progress.update(section_tasks[section_id],
-                                    advance=1,
-                                    description=f"[{color}]{section_id:.<30}{status_char}")
-                else:
-                    # Task finished, but shutdown was requested during its run or while waiting
-                    results[section_id] = {"status": "interrupted", "error": "Shutdown requested during execution", "execution_time": 0} # Assume 0 time if interrupted? Or try to get partial?
-                    progress.update(section_tasks[section_id], description=f"[yellow]{section_id:.<30}⚠ (Interrupted)")
-
+                # This is the blocking call where a hang might occur
+                result = future.result()
+                temp_results[section_id] = result
+                logger.debug(f"Result received for section: {section_id}, status: {result.get('status')}")
             except Exception as e:
-                logger.error(f"Error processing result for {section_id}: {str(e)}")
-                results[section_id] = {"status": "error", "error": f"Future result error: {str(e)}", "execution_time": 0} # Assume 0 time if future failed badly
-                progress.update(section_tasks[section_id], description=f"[red]{section_id:.<30}✗ (Result Error)", completed=1)
+                logger.error(f"Error retrieving result for {section_id}: {str(e)}")
+                temp_results[section_id] = {"status": "error", "error": f"Future result error: {str(e)}", "execution_time": 0}
             finally:
                  processed_count += 1
-                 progress.update(main_task, completed=processed_count) # Update main task progress
+                 logger.debug(f"Processed {processed_count}/{len(futures)} futures.")
 
+        logger.info("All section generation futures completed.")
+
+        # Now update results and progress bar after all futures are done
+        results = {}
+        processed_count = 0 # Reset for progress update
+        for section_id, prompt_func_name in prompt_func_config:
+             result = temp_results.get(section_id)
+             if result:
+                 if shutdown_requested and result.get("status") not in ["error", "skipped"]:
+                      # Mark as interrupted if shutdown happened during wait
+                      result['status'] = 'interrupted'
+                      result['error'] = 'Shutdown requested during processing'
+
+                 results[section_id] = result
+                 status_char = "✓" if result.get("status") == 'success' else ("✗" if result.get("status") == "error" else "⚠")
+                 color = "green" if result.get("status") == 'success' else ("red" if result.get("status") == "error" else "yellow")
+                 status_text = f"({result.get('status', 'unknown')})"
+                 progress.update(section_tasks[section_id],
+                                 advance=1, # Mark as completed
+                                 description=f"[{color}]{section_id:.<30}{status_char} {status_text}")
+             else:
+                  # Should not happen if submission logic is correct, but handle defensively
+                  logger.error(f"No result found for expected section {section_id}")
+                  results[section_id] = {"status": "error", "error": "Result missing", "execution_time": 0}
+                  progress.update(section_tasks[section_id], description=f"[red]{section_id:.<30}✗ (Missing Result)", completed=1)
+
+             processed_count += 1
+             progress.update(main_task, completed=processed_count)
+        # --- END MODIFICATION ---
 
     # --- Compile Stats & Save ---
+    logger.info("Compiling final statistics...") # Add logging
     total_execution_time = time.time() - start_time
     # Filter out skipped sections when calculating summary stats unless needed
     valid_results = {k: v for k, v in results.items() if v.get('status') != 'skipped'}
@@ -1001,49 +1026,56 @@ def filter_vendors_based_on_answers(
             # Try to parse the structured format first
             structured_pattern = r"FILTERED_VENDORS_START\s*\n(.*?)\s*FILTERED_VENDORS_END"
             structured_match = re.search(structured_pattern, raw_filtered_text, re.DOTALL)
-            
+            raw_filtered_list = [] # Store initially parsed names
+
             if structured_match:
-                # Parse the structured format
                 vendor_list_text = structured_match.group(1).strip()
-                # --- MODIFICATION START ---
-                # Remove '- ' prefix and strip extra whitespace
-                filtered_vendors = [
+                # Parse lines, removing '- ' if present
+                raw_filtered_list = [
                     line.strip()[2:].strip() if line.strip().startswith('- ') else line.strip()
                     for line in vendor_list_text.split('\n')
                     if line.strip() and not line.strip().startswith('[') and not line.strip() == '...'
                 ]
-                # --- MODIFICATION END ---
-                logger.info(f"Parsed {len(filtered_vendors)} vendors from structured format.")
+                logger.info(f"Parsed {len(raw_filtered_list)} potential vendors from structured format: {raw_filtered_list}")
             else:
-                # Fall back to parsing line by line if the structured format is not found
+                # Fallback logic (keep as is for now, but ideally LLM should always return structured)
                 logger.warning("Structured format not found in LLM response, falling back to line-by-line parsing.")
-                filtered_vendors = [line.strip() for line in raw_filtered_text.strip().split('\n') if line.strip()]
-                
-            # Apply normalized verification regardless of parsing method
-            verified_filtered = []
-            for v in filtered_vendors:
-                # Normalize vendor names for better matching
-                normalized_v = v.lower().replace("inc.", "").replace("ltd.", "").replace("corporation", "").replace("corp.", "").strip()
-                
-                # Check if this vendor matches any in the initial list using the normalized comparison
-                matched = False
+                raw_filtered_list = [line.strip() for line in raw_filtered_text.strip().split('\n') if line.strip()]
+
+            # --- Verification and Final List Creation ---
+            filtered_vendors = [] # Final clean list
+            verified_filtered_set = set() # Use a set for efficient lookup during verification
+
+            for potential_vendor in raw_filtered_list:
+                # Normalize the vendor name suggested by LLM
+                normalized_potential = potential_vendor.lower().replace("inc.", "").replace("ltd.", "").replace("corporation", "").replace("corp.", "").strip()
+
+                # Check against initial vendors
+                matched_original_name = None
                 for initial_vendor in initial_vendors:
                     normalized_initial = initial_vendor.lower().replace("inc.", "").replace("ltd.", "").replace("corporation", "").replace("corp.", "").strip()
-                    
-                    # Check two forms of containment (to handle shortened names like "Google" vs "Google Cloud")
-                    if normalized_v in normalized_initial or normalized_initial in normalized_v:
-                        # Found a match - add the original name from the initial_vendors list for consistency
-                        verified_filtered.append(initial_vendor)
-                        matched = True
-                        break
-                
-                # If no match found, log warning
-                if not matched:
-                    logger.warning(f"Vendor '{v}' suggested by LLM doesn't match any initial vendor. Excluding.")
-            
-            if len(verified_filtered) != len(filtered_vendors):
-                logger.warning(f"LLM returned {len(filtered_vendors)} vendors but only {len(verified_filtered)} matched the initial list.")
-                filtered_vendors = verified_filtered
+
+                    # More flexible matching (handle cases like "Dell" vs "Dell Technologies")
+                    # Check if one is a substring of the other OR very similar
+                    if normalized_potential == normalized_initial or normalized_potential in normalized_initial or normalized_initial in normalized_potential:
+                         # Check if we already added this original vendor
+                         if initial_vendor not in verified_filtered_set:
+                             matched_original_name = initial_vendor # Store the original name
+                             break # Found a match
+
+                if matched_original_name:
+                    filtered_vendors.append(matched_original_name)
+                    verified_filtered_set.add(matched_original_name) # Add original name to set
+                else:
+                    logger.warning(f"Vendor '{potential_vendor}' suggested by LLM doesn't clearly match any initial vendor. Excluding.")
+
+            if len(raw_filtered_list) != len(filtered_vendors):
+                logger.warning(f"LLM suggested {len(raw_filtered_list)} vendors but only {len(filtered_vendors)} were verified against the initial list.")
+
+            # Ensure the final list is unique and sorted
+            filtered_vendors = sorted(list(set(filtered_vendors)))
+
+            logger.info(f"Final filtered vendor list: {filtered_vendors}") # Should now contain clean names
 
         logger.info(f"Final filtered vendor list: {filtered_vendors}")
     except Exception as e:
@@ -1381,12 +1413,31 @@ def trigger_vendor_deep_dives(
     
     try:
         # Start parallel processing of vendors with maximum concurrency
-        max_workers = len(vendors_to_research)  # Use maximum parallelism
+        max_workers = len(vendors_to_research)
         
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all vendor research tasks
             future_to_vendor = {}
+            # --- MODIFICATION: Clean names before submitting ---
+            cleaned_vendors_to_research = []
             for vendor_name in vendors_to_research:
+                 # Basic cleaning - assumes the list might still have issues
+                 cleaned_name = vendor_name.strip()
+                 if cleaned_name.startswith('- '):
+                     cleaned_name = cleaned_name[2:].strip()
+                 if cleaned_name: # Avoid empty names
+                     cleaned_vendors_to_research.append(cleaned_name)
+                 else:
+                     logger.warning(f"Skipping deep dive for invalid/empty vendor name derived from: '{vendor_name}'")
+
+            if not cleaned_vendors_to_research:
+                 logger.warning("No valid vendor names remaining after cleaning for deep dives.")
+                 return {}
+
+            logger.info(f"Cleaned vendor list for deep dive: {cleaned_vendors_to_research}")
+            # --- END MODIFICATION ---
+
+            # Submit tasks using CLEANED names
+            for vendor_name in cleaned_vendors_to_research: # Use the cleaned list
                 # Check if we should continue 
                 if shutdown_requested:
                     continue
@@ -1394,15 +1445,12 @@ def trigger_vendor_deep_dives(
                 # Each future runs the full vendor research process
                 future = executor.submit(
                     run_vendor_research,
-                    vendor_name=vendor_name,
+                    vendor_name=vendor_name, # Pass the CLEAN name
                     context_company_name=context_company_name,
                     optional_inputs=optional_inputs,
                     # Don't pass progress_context - each subprocess should manage its own
                 )
-                future_to_vendor[future] = vendor_name
-                
-                # Remove delay to maximize throughput
-                # time.sleep(0.5)
+                future_to_vendor[future] = vendor_name # Store the CLEAN name
             
             # Process results as they complete
             for future in as_completed(future_to_vendor):
