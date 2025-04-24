@@ -284,13 +284,24 @@ def _generate_report_sections(
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {}
-        for section_id, prompt_func_name in prompt_func_config:
+        # Process sections in the order specified by section_order_config
+        for section_id, _ in section_order_config:
             if shutdown_requested:
                 logger.warning(f"Shutdown requested, skipping section: {section_id}")
                 results[section_id] = {"status": "skipped", "error": "Shutdown requested", "execution_time": 0}
                 if status_dict is not None:
                     status_dict[section_id] = {"status": "skipped", "error": "Shutdown requested", "execution_time": 0}
                 progress.update(section_tasks[section_id], description=f"[yellow]{section_id:.<30}⚠ (Skipped)", completed=1)
+                continue
+
+            # Find the corresponding prompt function for this section
+            prompt_func_name = next((func for sec, func in prompt_func_config if sec == section_id), None)
+            if not prompt_func_name:
+                logger.error(f"No prompt function found for section: {section_id}")
+                results[section_id] = {"status": "error", "error": f"No prompt function found for section: {section_id}", "execution_time": 0}
+                if status_dict is not None:
+                    status_dict[section_id] = {"status": "error", "error": f"No prompt function found for section: {section_id}", "execution_time": 0}
+                progress.update(section_tasks[section_id], description=f"[red]{section_id:.<30}✗ (No Prompt)", completed=1)
                 continue
 
             try:
@@ -308,16 +319,21 @@ def _generate_report_sections(
 
                 prompt = prompt_func(**valid_args)
                 output_path = markdown_dir / f"{section_id}.md"
-                # Pass section_id and status_dict to _generate_single_section
+                
+                # Update status to running
+                if status_dict is not None:
+                    status_dict[section_id].update({"status": "running"})
+                
+                # Submit the task
                 future = executor.submit(_generate_single_section, client, prompt, output_path, section_id, status_dict)
                 futures[future] = section_id
 
             except AttributeError as attr_e:
-                 logger.error(f"Prompt function '{prompt_func_name}' not found in module {prompt_module.__name__}. Error: {attr_e}")
-                 results[section_id] = {"status": "error", "error": f"Prompt function '{prompt_func_name}' not found in {prompt_module.__name__}.", "execution_time": 0}
-                 if status_dict is not None:
-                     status_dict[section_id] = {"status": "error", "error": f"Prompt function not found: {prompt_func_name}", "execution_time": 0}
-                 progress.update(section_tasks[section_id], description=f"[red]{section_id:.<30}✗ (Not Found)", completed=1)
+                logger.error(f"Prompt function '{prompt_func_name}' not found in module {prompt_module.__name__}. Error: {attr_e}")
+                results[section_id] = {"status": "error", "error": f"Prompt function '{prompt_func_name}' not found in {prompt_module.__name__}.", "execution_time": 0}
+                if status_dict is not None:
+                    status_dict[section_id] = {"status": "error", "error": f"Prompt function not found: {prompt_func_name}", "execution_time": 0}
+                progress.update(section_tasks[section_id], description=f"[red]{section_id:.<30}✗ (Not Found)", completed=1)
             except Exception as e:
                 logger.error(f"Error preparing prompt for {section_id}: {e}")
                 import traceback
@@ -327,64 +343,56 @@ def _generate_report_sections(
                     status_dict[section_id] = {"status": "error", "error": f"Error preparing prompt: {str(e)}", "execution_time": 0}
                 progress.update(section_tasks[section_id], description=f"[red]{section_id:.<30}✗ (Prompt Error)", completed=1)
 
-        logger.info(f"Submitted {len(futures)} sections for generation.") # Log submission
+        logger.info(f"Submitted {len(futures)} sections for generation.")
 
-        # --- MODIFICATION: Collect results first, then update progress ---
+        # --- Collect results as they complete ---
         temp_results = {}
         processed_count = 0
         logger.info("Waiting for section generation results...")
+        
+        # Process futures in order of completion
         for future in as_completed(futures):
             section_id = futures[future]
             try:
                 # This is the blocking call where a hang might occur
                 result = future.result()
                 temp_results[section_id] = result
+                
+                # Update status immediately when a section completes
+                if status_dict is not None:
+                    status_dict[section_id].update({
+                        "status": result.get("status", "unknown"),
+                        "error": result.get("error"),
+                        "execution_time": result.get("execution_time", 0)
+                    })
+                
+                # Update progress immediately
+                status_char = "✓" if result.get("status") == 'success' else ("✗" if result.get("status") == "error" else "⚠")
+                color = "green" if result.get("status") == 'success' else ("red" if result.get("status") == "error" else "yellow")
+                status_text = f"({result.get('status', 'unknown')})"
+                progress.update(section_tasks[section_id],
+                             advance=1,
+                             description=f"[{color}]{section_id:.<30}{status_char} {status_text}")
+                
                 logger.debug(f"Result received for section: {section_id}, status: {result.get('status')}")
             except Exception as e:
                 logger.error(f"Error retrieving result for {section_id}: {str(e)}")
                 temp_results[section_id] = {"status": "error", "error": f"Future result error: {str(e)}", "execution_time": 0}
                 if status_dict is not None:
                     status_dict[section_id].update({"status": "error", "error": f"Future result error: {str(e)}"})
+                progress.update(section_tasks[section_id], description=f"[red]{section_id:.<30}✗ (Result Error)", completed=1)
             finally:
-                 processed_count += 1
-                 logger.debug(f"Processed {processed_count}/{len(futures)} futures.")
+                processed_count += 1
+                progress.update(main_task, completed=processed_count)
+                logger.debug(f"Processed {processed_count}/{len(futures)} futures.")
 
         logger.info("All section generation futures completed.")
 
-        # Now update results and progress bar after all futures are done
-        results = {}
-        processed_count = 0 # Reset for progress update
-        for section_id, prompt_func_name in prompt_func_config:
-             result = temp_results.get(section_id)
-             if result:
-                 if shutdown_requested and result.get("status") not in ["error", "skipped"]:
-                      # Mark as interrupted if shutdown happened during wait
-                      result['status'] = 'interrupted'
-                      result['error'] = 'Shutdown requested during processing'
-                      if status_dict is not None:
-                          status_dict[section_id].update({"status": "interrupted", "error": "Shutdown requested during processing"})
-
-                 results[section_id] = result
-                 status_char = "✓" if result.get("status") == 'success' else ("✗" if result.get("status") == "error" else "⚠")
-                 color = "green" if result.get("status") == 'success' else ("red" if result.get("status") == "error" else "yellow")
-                 status_text = f"({result.get('status', 'unknown')})"
-                 progress.update(section_tasks[section_id],
-                                 advance=1, # Mark as completed
-                                 description=f"[{color}]{section_id:.<30}{status_char} {status_text}")
-             else:
-                  # Should not happen if submission logic is correct, but handle defensively
-                  logger.error(f"No result found for expected section {section_id}")
-                  results[section_id] = {"status": "error", "error": "Result missing", "execution_time": 0}
-                  if status_dict is not None:
-                      status_dict[section_id] = {"status": "error", "error": "Result missing", "execution_time": 0}
-                  progress.update(section_tasks[section_id], description=f"[red]{section_id:.<30}✗ (Missing Result)", completed=1)
-
-             processed_count += 1
-             progress.update(main_task, completed=processed_count)
-        # --- END MODIFICATION ---
+        # Update final results
+        results = temp_results
 
     # --- Compile Stats & Save ---
-    logger.info("Compiling final statistics...") # Add logging
+    logger.info("Compiling final statistics...")
     total_execution_time = time.time() - start_time
     # Filter out skipped sections when calculating summary stats unless needed
     valid_results = {k: v for k, v in results.items() if v.get('status') != 'skipped'}
@@ -417,7 +425,6 @@ def _generate_report_sections(
             "interrupted_sections": sum(1 for r in results.values() if r.get("status") == 'interrupted'),
             "skipped_sections": sum(1 for r in results.values() if r.get("status") == 'skipped'),
             "was_interrupted": shutdown_requested,
-            # Add the missing keys needed for the summary panel
             "total_sections": total_sections_requested,
             "success_percentage": success_percentage_val
         }
@@ -591,6 +598,13 @@ def run_product_research_initial(
             optional_inputs=optional_inputs
         )
 
+        # Update status to running if status_dict is provided
+        if status_dict is not None:
+            question_section_id = "product_filter_questions"
+            if question_section_id not in status_dict:
+                status_dict[question_section_id] = {"status": "pending"}
+            status_dict[question_section_id].update({"status": "running"})
+
         # Use the updated method to generate content
         contents = [types.Content(role="user", parts=[types.Part.from_text(text=question_gen_prompt)])]
         generate_content_config = types.GenerateContentConfig(
@@ -610,10 +624,37 @@ def run_product_research_initial(
 
         # Parse the '- ' prefixed lines into a list
         filtering_questions = [q.strip('- ').strip() for q in raw_questions_text.strip().split('\n') if q.strip().startswith('- ')]
+        
+        # Update status to complete if successful
+        if status_dict is not None and filtering_questions:
+            status_dict[question_section_id].update({
+                "status": "success", 
+                "execution_time": 0, # We don't track time for this separately
+                "output": f"Generated {len(filtering_questions)} filtering questions"
+            })
+            
         console.print(f"[green]Generated {len(filtering_questions)} filtering questions.[/green]")
+        
+        # Save the questions to a file for reference
+        questions_path = markdown_dir / "product_filter_questions.md"
+        try:
+            with open(questions_path, 'w', encoding='utf-8') as f:
+                f.write(f"# Filter Questions for {product_category}\n\n")
+                for i, q in enumerate(filtering_questions, 1):
+                    f.write(f"{i}. {q}\n\n")
+            logger.info(f"Saved {len(filtering_questions)} filter questions to {questions_path}")
+        except Exception as save_e:
+            logger.warning(f"Could not save filter questions to file: {save_e}")
 
     except Exception as e:
         logger.error(f"Failed to generate filtering questions: {e}")
+        # Update status to error if failed
+        if status_dict is not None:
+            question_section_id = "product_filter_questions"
+            status_dict[question_section_id].update({
+                "status": "error", 
+                "error": f"Failed to generate filtering questions: {str(e)}"
+            })
         # Proceed without questions, but log the error
 
     # Return results including the questions
@@ -887,7 +928,8 @@ def get_product_relevance_prompt():
 def filter_vendors_based_on_answers(
     base_dir: Path, # Directory containing the initial product analysis
     questions: List[str],
-    answers: List[str]
+    answers: List[str],
+    status_dict: Dict = None # Add status_dict parameter
 ) -> Optional[List[str]]:
     """
     Parses the initial vendor list, calls LLM to filter based on Q&A,
@@ -897,12 +939,24 @@ def filter_vendors_based_on_answers(
     if shutdown_requested: return None # Check for interrupt
 
     console.print("[magenta]Processing user answers to filter vendors...[/magenta]")
+    
+    # Update status to running if status_dict is provided
+    filter_section_id = "vendor_filtering"
+    if status_dict is not None:
+        if filter_section_id not in status_dict:
+            status_dict[filter_section_id] = {"status": "pending"}
+        status_dict[filter_section_id].update({"status": "running"})
 
     # --- Step 1: Parse Initial Vendor List ---
     initial_vendors = []
     vendor_id_section_file = base_dir / "markdown" / "product_vendor_identification.md"
     if not vendor_id_section_file.exists():
         logger.error(f"Vendor identification file not found: {vendor_id_section_file}")
+        if status_dict is not None:
+            status_dict[filter_section_id].update({
+                "status": "error", 
+                "error": f"Vendor identification file not found: {vendor_id_section_file}"
+            })
         return None # Cannot proceed without the initial list
 
     try:
@@ -1029,12 +1083,22 @@ def filter_vendors_based_on_answers(
         
         if not initial_vendors:
             logger.error("Could not parse any vendors using any method. Check the vendor identification file format.")
+            if status_dict is not None:
+                status_dict[filter_section_id].update({
+                    "status": "error", 
+                    "error": "Could not parse any vendors using any method. Check the vendor identification file format."
+                })
             return None
 
     except Exception as e:
         logger.error(f"Error parsing vendor list from {vendor_id_section_file}: {e}")
         import traceback
         logger.error(traceback.format_exc())
+        if status_dict is not None:
+            status_dict[filter_section_id].update({
+                "status": "error", 
+                "error": f"Error parsing vendor list: {str(e)}"
+            })
         return None
 
     # --- Step 2: Call LLM to Filter ---
@@ -1134,11 +1198,27 @@ def filter_vendors_based_on_answers(
             logger.info(f"Final filtered vendor list: {filtered_vendors}") # Should now contain clean names
 
         logger.info(f"Final filtered vendor list: {filtered_vendors}")
+        
+        # Update status to success
+        if status_dict is not None:
+            status_dict[filter_section_id].update({
+                "status": "success", 
+                "execution_time": 0, # We don't track time for this separately
+                "output": f"Filtered down to {len(filtered_vendors)} vendors"
+            })
+            
     except Exception as e:
         logger.error(f"Error calling LLM for vendor filtering: {e}")
         import traceback
         logger.error(traceback.format_exc())
         filtered_vendors = None
+        
+        # Update status to error
+        if status_dict is not None:
+            status_dict[filter_section_id].update({
+                "status": "error", 
+                "error": f"Error filtering vendors: {str(e)}"
+            })
 
     # Save the filtered vendor list to the base_dir for reference
     if filtered_vendors is not None:
@@ -1154,6 +1234,19 @@ def filter_vendors_based_on_answers(
                 f.write(f"## Filtered Vendor List\n\n")
                 for vendor in filtered_vendors:
                     f.write(f"- {vendor}\n")
+                    
+            # Also save as markdown file for visibility in the UI
+            markdown_dir = base_dir / "markdown"
+            with open(markdown_dir / "filtered_vendors.md", 'w', encoding='utf-8') as f:
+                f.write(f"# Filtered Vendors\n\n")
+                f.write(f"Based on your answers to the filtering questions, the following vendors were identified as the best matches for your needs:\n\n")
+                for vendor in filtered_vendors:
+                    f.write(f"- **{vendor}**\n")
+                f.write(f"\n\n## Your Filtering Criteria\n\n")
+                for i, (q, a) in enumerate(zip(questions, answers)):
+                    f.write(f"**Q{i+1}:** {q}\n\n")
+                    f.write(f"**A{i+1}:** {a}\n\n")
+                    
         except Exception as e:
             logger.error(f"Error saving filtered vendor list: {e}")
 
@@ -1341,7 +1434,67 @@ def generate_product_report_phase2(
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {}
-        for section_id, prompt_func, args_dict, output_filename in tasks_to_run:
+        # Order tasks based on their presence in PRODUCT_FULL_SECTION_ORDER
+        # This ensures sections are processed in the correct order
+        # Start by extracting the section IDs from PRODUCT_FULL_SECTION_ORDER
+        product_full_section_ids = [section_id for section_id, _ in PRODUCT_FULL_SECTION_ORDER]
+        
+        # Sort tasks_to_run based on their order in product_full_section_ids
+        # For profile sections, maintain their original order since they're not explicitly in PRODUCT_FULL_SECTION_ORDER
+        
+        # First sort vendor profiles (they'll all be under 'vendor_light_profiles' in the config)
+        profile_tasks = [(section_id, prompt_func, args_dict, output_filename) 
+                         for section_id, prompt_func, args_dict, output_filename in tasks_to_run
+                         if section_id.startswith('profile_')]
+                         
+        # Now get non-profile tasks and sort them based on PRODUCT_FULL_SECTION_ORDER
+        non_profile_tasks = [(section_id, prompt_func, args_dict, output_filename)
+                            for section_id, prompt_func, args_dict, output_filename in tasks_to_run
+                            if not section_id.startswith('profile_')]
+        
+        # Custom sort function that looks up position in product_full_section_ids
+        def get_section_position(section_id):
+            # For non-profile sections, find their exact position
+            if section_id in product_full_section_ids:
+                return product_full_section_ids.index(section_id)
+            # For special sections, find the related section
+            elif section_id == "comparison_matrix":
+                # Should come after vendor profiles
+                try:
+                    return product_full_section_ids.index("comparison_matrix") 
+                except ValueError:
+                    # If not found, place after vendor_light_profiles
+                    try:
+                        return product_full_section_ids.index("vendor_light_profiles") + 0.5
+                    except ValueError:
+                        return len(product_full_section_ids) # Fallback to the end
+            elif section_id == "product_relevance":
+                # Relevance analysis comes after comparison
+                try:
+                    return product_full_section_ids.index("product_relevance")
+                except ValueError:
+                    try:
+                        return product_full_section_ids.index("comparison_matrix") + 0.5
+                    except ValueError:
+                        return len(product_full_section_ids)
+            elif section_id == "product_recommendations":
+                # Recommendations come near the end
+                try:
+                    return product_full_section_ids.index("product_recommendations")
+                except ValueError:
+                    try:
+                        return product_full_section_ids.index("product_relevance") + 0.5
+                    except ValueError:
+                        return len(product_full_section_ids)
+            # Default position for unknown sections
+            return len(product_full_section_ids) + 1
+        
+        # Sort non-profile tasks
+        sorted_non_profile_tasks = sorted(non_profile_tasks, key=lambda x: get_section_position(x[0]))
+        
+        # First process profiles (they're conceptually one section)
+        for task in profile_tasks:
+            section_id, prompt_func, args_dict, output_filename = task
             if shutdown_requested:
                  phase2_results[section_id] = {"status": "skipped", "error": "Shutdown requested", "execution_time": 0}
                  if status_dict is not None:
@@ -1349,6 +1502,10 @@ def generate_product_report_phase2(
                  progress.update(section_tasks_p2[section_id], description=f"[yellow]{section_id[:30]:.<30}⚠ (Skipped)", completed=1)
                  continue
             try:
+                 # Update status to running
+                 if status_dict is not None:
+                     status_dict[section_id].update({"status": "running"})
+                 
                  # Simple argument filtering
                  import inspect
                  sig = inspect.signature(prompt_func)
@@ -1356,7 +1513,40 @@ def generate_product_report_phase2(
 
                  prompt = prompt_func(**valid_args)
                  output_path = markdown_dir / output_filename
-                 # Pass section_id and status_dict to _generate_single_section
+                 
+                 # Submit the task
+                 future = executor.submit(_generate_single_section, client, prompt, output_path, section_id, status_dict)
+                 futures[future] = section_id
+            except Exception as e:
+                 logger.error(f"Error preparing Phase 2 prompt for {section_id}: {e}")
+                 phase2_results[section_id] = {"status": "error", "error": f"Error preparing prompt: {e}", "execution_time": 0}
+                 if status_dict is not None:
+                     status_dict[section_id] = {"status": "error", "error": f"Error preparing prompt: {e}", "execution_time": 0}
+                 progress.update(section_tasks_p2[section_id], description=f"[red]{section_id[:30]:.<30}✗ (Prompt Error)", completed=1)
+                 
+        # Then process non-profile tasks in correct order
+        for task in sorted_non_profile_tasks:
+            section_id, prompt_func, args_dict, output_filename = task
+            if shutdown_requested:
+                 phase2_results[section_id] = {"status": "skipped", "error": "Shutdown requested", "execution_time": 0}
+                 if status_dict is not None:
+                     status_dict[section_id] = {"status": "skipped", "error": "Shutdown requested", "execution_time": 0}
+                 progress.update(section_tasks_p2[section_id], description=f"[yellow]{section_id[:30]:.<30}⚠ (Skipped)", completed=1)
+                 continue
+            try:
+                 # Update status to running
+                 if status_dict is not None:
+                     status_dict[section_id].update({"status": "running"})
+                 
+                 # Simple argument filtering
+                 import inspect
+                 sig = inspect.signature(prompt_func)
+                 valid_args = {k: v for k, v in args_dict.items() if k in sig.parameters}
+
+                 prompt = prompt_func(**valid_args)
+                 output_path = markdown_dir / output_filename
+                 
+                 # Submit the task
                  future = executor.submit(_generate_single_section, client, prompt, output_path, section_id, status_dict)
                  futures[future] = section_id
             except Exception as e:
@@ -1367,29 +1557,40 @@ def generate_product_report_phase2(
                  progress.update(section_tasks_p2[section_id], description=f"[red]{section_id[:30]:.<30}✗ (Prompt Error)", completed=1)
 
         processed_count = 0
+        # Process futures in order of completion
         for future in as_completed(futures):
             section_id = futures[future]
             try:
-                 if not shutdown_requested:
-                     result = future.result()
-                     phase2_results[section_id] = result
-                     status_char = "✓" if result['status'] == 'success' else "✗"
-                     color = "green" if result['status'] == 'success' else "red"
-                     progress.update(section_tasks_p2[section_id], advance=1, description=f"[{color}]{section_id[:30]:.<30}{status_char}")
-                 else:
-                     phase2_results[section_id] = {"status": "interrupted", "error": "Shutdown requested during execution", "execution_time": 0}
-                     if status_dict is not None:
-                         status_dict[section_id] = {"status": "interrupted", "error": "Shutdown requested during execution", "execution_time": 0}
-                     progress.update(section_tasks_p2[section_id], description=f"[yellow]{section_id[:30]:.<30}⚠ (Interrupted)")
+                result = future.result()
+                phase2_results[section_id] = result
+                
+                # Update status immediately when a section completes
+                if status_dict is not None:
+                    status_dict[section_id].update({
+                        "status": result.get("status", "unknown"),
+                        "error": result.get("error"),
+                        "execution_time": result.get("execution_time", 0)
+                    })
+                
+                # Update progress immediately
+                status_char = "✓" if result.get("status") == 'success' else ("✗" if result.get("status") == "error" else "⚠")
+                color = "green" if result.get("status") == 'success' else ("red" if result.get("status") == "error" else "yellow")
+                status_text = f"({result.get('status', 'unknown')})"
+                progress.update(section_tasks_p2[section_id],
+                             advance=1,
+                             description=f"[{color}]{section_id[:30]:.<30}{status_char} {status_text}")
+                
+                logger.debug(f"Result received for section: {section_id}, status: {result.get('status')}")
             except Exception as e:
                  logger.error(f"Error processing Phase 2 result for {section_id}: {str(e)}")
                  phase2_results[section_id] = {"status": "error", "error": f"Future result error: {str(e)}", "execution_time": 0}
                  if status_dict is not None:
-                     status_dict[section_id] = {"status": "error", "error": f"Future result error: {str(e)}", "execution_time": 0}
+                     status_dict[section_id].update({"status": "error", "error": f"Future result error: {str(e)}"})
                  progress.update(section_tasks_p2[section_id], description=f"[red]{section_id[:30]:.<30}✗ (Result Error)", completed=1)
             finally:
                  processed_count += 1
                  progress.update(main_task_p2, completed=processed_count)
+                 logger.debug(f"Processed {processed_count}/{len(futures)} futures.")
 
     # --- Compile Stats for Phase 2 ---
     phase2_execution_time = time.time() - phase2_start_time
@@ -1450,6 +1651,7 @@ def trigger_vendor_deep_dives(
     vendors_to_research: List[str],
     context_company_name: str,
     optional_inputs: Dict, # Original product optional inputs
+    status_dict: Dict = None, # Add status_dict parameter
     progress_context=None
 ) -> Dict[str, Tuple[Optional[Dict], Optional[Path], Optional[Dict], Optional[Path]]]: # Added base_dir to return tuple
     """
@@ -1466,6 +1668,17 @@ def trigger_vendor_deep_dives(
     
     console.print(f"\n[bold blue]Starting Deep Dive Vendor Research for {len(vendors_to_research)} vendors...[/bold blue]")
     deep_dive_results = {}
+    
+    # Initialize status for deep dive if status_dict is provided
+    if status_dict is not None:
+        deep_dive_section_id = "vendor_deep_dives"
+        if deep_dive_section_id not in status_dict:
+            status_dict[deep_dive_section_id] = {"status": "pending"}
+        status_dict[deep_dive_section_id].update({
+            "status": "running",
+            "vendors": vendors_to_research,
+            "completed": 0
+        })
     
     # Use provided progress or create a new one
     progress = progress_context or Progress(
@@ -1507,6 +1720,13 @@ def trigger_vendor_deep_dives(
 
             logger.info(f"Cleaned vendor list for deep dive: {cleaned_vendors_to_research}")
             # --- END MODIFICATION ---
+            
+            # Create vendor-specific status tracking if status_dict is provided
+            if status_dict is not None:
+                for vendor_name in cleaned_vendors_to_research:
+                    vendor_section_id = f"deep_dive_{re.sub(r'[^a-zA-Z0-9_]', '_', vendor_name)}"
+                    if vendor_section_id not in status_dict:
+                        status_dict[vendor_section_id] = {"status": "pending", "vendor": vendor_name}
 
             # Submit tasks using CLEANED names
             for vendor_name in cleaned_vendors_to_research: # Use the cleaned list
@@ -1514,12 +1734,20 @@ def trigger_vendor_deep_dives(
                 if shutdown_requested:
                     continue
                 
+                # Create vendor-specific status dict for this vendor
+                vendor_status_dict = None
+                if status_dict is not None:
+                    vendor_section_id = f"deep_dive_{re.sub(r'[^a-zA-Z0-9_]', '_', vendor_name)}"
+                    status_dict[vendor_section_id].update({"status": "running"})
+                    vendor_status_dict = {}  # Create a fresh status dict for this vendor
+                
                 # Each future runs the full vendor research process
                 future = executor.submit(
                     run_vendor_research,
                     vendor_name=vendor_name, # Pass the CLEAN name
                     context_company_name=context_company_name,
                     optional_inputs=optional_inputs,
+                    status_dict=vendor_status_dict, # Pass the vendor-specific status dict
                     # Don't pass progress_context - each subprocess should manage its own
                 )
                 future_to_vendor[future] = vendor_name # Store the CLEAN name
@@ -1534,6 +1762,28 @@ def trigger_vendor_deep_dives(
                         # Store all values plus the base_dir (available in token_stats)
                         vendor_base_dir = token_stats.get('base_dir') if token_stats else None
                         deep_dive_results[vendor_name] = (token_stats, pdf_path, dashboard_data, vendor_base_dir)
+                        
+                        # Update status for the individual vendor
+                        if status_dict is not None:
+                            vendor_section_id = f"deep_dive_{re.sub(r'[^a-zA-Z0-9_]', '_', vendor_name)}"
+                            status = "success" if token_stats and token_stats.get('summary', {}).get('successful_sections', 0) > 0 else "error"
+                            status_dict[vendor_section_id].update({
+                                "status": status,
+                                "vendor": vendor_name,
+                                "base_dir": vendor_base_dir,
+                                "pdf_path": str(pdf_path) if pdf_path else None,
+                                "sections_generated": token_stats.get('summary', {}).get('successful_sections', 0) if token_stats else 0
+                            })
+                            
+                            # Update the overall deep dive status
+                            deep_dive_section_id = "vendor_deep_dives"
+                            completed = status_dict[deep_dive_section_id].get("completed", 0) + 1
+                            status_dict[deep_dive_section_id].update({
+                                "completed": completed,
+                                "total": len(cleaned_vendors_to_research),
+                                "progress": completed / len(cleaned_vendors_to_research)
+                            })
+                        
                         if not progress_bar_external and main_task_dd:
                             progress.update(main_task_dd, advance=1, description=f"Deep Dive Complete: {vendor_name}")
                         logger.info(f"Successfully completed deep dive for vendor: {vendor_name}")
@@ -1546,15 +1796,63 @@ def trigger_vendor_deep_dives(
                     else:
                         deep_dive_results[vendor_name] = ({"summary": {"was_interrupted": True}}, None, None, None)
                         logger.warning(f"Skipping/Interrupting deep dive for vendor: {vendor_name}")
+                        
+                        # Update status for interrupted vendor
+                        if status_dict is not None:
+                            vendor_section_id = f"deep_dive_{re.sub(r'[^a-zA-Z0-9_]', '_', vendor_name)}"
+                            status_dict[vendor_section_id].update({
+                                "status": "interrupted",
+                                "error": "Shutdown requested during execution"
+                            })
                 except Exception as e:
                     deep_dive_results[vendor_name] = ({"summary": {"error": str(e)}}, None, None, None)
                     logger.error(f"Error during deep dive for vendor {vendor_name}: {e}")
+                    
+                    # Update status for failed vendor
+                    if status_dict is not None:
+                        vendor_section_id = f"deep_dive_{re.sub(r'[^a-zA-Z0-9_]', '_', vendor_name)}"
+                        status_dict[vendor_section_id].update({
+                            "status": "error",
+                            "error": str(e)
+                        })
+                        
                     if not progress_bar_external and main_task_dd:
                         progress.update(main_task_dd, description=f"Error in Deep Dive: {vendor_name}")
     
     except Exception as e:
         logger.error(f"Error in deep dive management: {e}")
+        
+        # Update overall deep dive status
+        if status_dict is not None:
+            deep_dive_section_id = "vendor_deep_dives"
+            status_dict[deep_dive_section_id].update({
+                "status": "error",
+                "error": f"Error in deep dive management: {str(e)}"
+            })
     finally:
+        # Update final status for the deep dive process
+        if status_dict is not None:
+            deep_dive_section_id = "vendor_deep_dives"
+            success_count = sum(1 for v, (stats, _, _, _) in deep_dive_results.items() 
+                          if stats and stats.get('summary', {}).get('successful_sections', 0) > 0)
+            
+            # Mark overall status based on success ratio
+            overall_status = "success"
+            if not deep_dive_results:
+                overall_status = "error"
+            elif success_count == 0:
+                overall_status = "error"
+            elif success_count < len(cleaned_vendors_to_research):
+                overall_status = "partial"
+                
+            status_dict[deep_dive_section_id].update({
+                "status": overall_status,
+                "completed": len(deep_dive_results),
+                "success_count": success_count,
+                "total": len(cleaned_vendors_to_research),
+                "progress": 1.0  # Mark as complete
+            })
+            
         if not progress_bar_external:
             progress.stop()
     
@@ -1587,6 +1885,7 @@ def generate_final_product_report(
     optional_inputs: Dict,
     filtered_vendors: List[str],
     deep_dive_vendors: List[str], # Vendors for whom deep dives were run
+    status_dict: Dict = None, # Add status_dict parameter
     progress_context=None
 ) -> Tuple[Optional[Path], Optional[Dict]]: # Returns (final_pdf_path, final_dashboard_data)
     """
@@ -1595,6 +1894,18 @@ def generate_final_product_report(
     console.print(f"\n[bold blue]Generating Final Combined Product Report PDF for: {product_category}[/bold blue]")
     final_pdf_path = None
     final_dashboard_data = None
+    
+    # Initialize status if status_dict is provided
+    if status_dict is not None:
+        final_report_section_id = "final_product_report"
+        if final_report_section_id not in status_dict:
+            status_dict[final_report_section_id] = {"status": "pending"}
+        status_dict[final_report_section_id].update({
+            "status": "running",
+            "product_category": product_category,
+            "filtered_vendors": filtered_vendors,
+            "deep_dive_vendors": deep_dive_vendors
+        })
 
     try:
         # Get deep dive directories from saved mapping if it exists
@@ -1607,12 +1918,24 @@ def generate_final_product_report(
                 console.print(f"[green]Loaded deep dive directory mapping for {len(deep_dive_dirs)} vendors.[/green]")
             except Exception as e:
                 logger.warning(f"Could not load deep dive directories mapping: {e}")
+                if status_dict is not None:
+                    status_dict[final_report_section_id].update({
+                        "warning": f"Could not load deep dive directories mapping: {str(e)}"
+                    })
         else:
             logger.warning("Deep dive directories mapping file not found. Some content might be missing from the final PDF.")
+            if status_dict is not None:
+                status_dict[final_report_section_id].update({
+                    "warning": "Deep dive directories mapping file not found"
+                })
             
         # Check if we have any deep dive directories to use
         if deep_dive_vendors and not deep_dive_dirs:
             logger.warning("Deep dive vendors specified but no directory mapping found.")
+            if status_dict is not None:
+                status_dict[final_report_section_id].update({
+                    "warning": "Deep dive vendors specified but no directory mapping found"
+                })
         
         # Generate the final PDF using the full section order
         pdf_path_generated = process_markdown_files(
@@ -1636,13 +1959,31 @@ def generate_final_product_report(
                  "section_order_used": PRODUCT_FULL_SECTION_ORDER # Pass the full order
             }
             final_dashboard_data = _generate_dashboard_data(base_dir, 'product', final_token_stats, filtered_vendors)
+            
+            # Update status to success
+            if status_dict is not None:
+                status_dict[final_report_section_id].update({
+                    "status": "success",
+                    "pdf_path": str(final_pdf_path),
+                    "has_dashboard": final_dashboard_data is not None
+                })
 
         else:
             console.print("[red]Final PDF generation failed.[/red]")
+            if status_dict is not None:
+                status_dict[final_report_section_id].update({
+                    "status": "error",
+                    "error": "Final PDF generation failed"
+                })
 
     except Exception as e:
         console.print(f"[red]Error during final product report generation: {e}[/red]")
         logger.exception(f"Final Product PDF/Dashboard Error for {base_dir}")
+        if status_dict is not None:
+            status_dict[final_report_section_id].update({
+                "status": "error",
+                "error": f"Error during final product report generation: {str(e)}"
+            })
 
     return final_pdf_path, final_dashboard_data
 

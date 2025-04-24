@@ -44,7 +44,13 @@ users.yaml
 credentials.yaml
 *.pdf
 *.log
-*.md
+# Don't ignore markdown files in the repository, only in output
+/output/**/*.md
+
+# Streamlit specific
+.streamlit/secrets.toml
+.streamlit/config.toml
+.streamlit/cache/
 
 # OS specific
 .DS_Store

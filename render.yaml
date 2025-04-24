@@ -1,10 +1,26 @@
 services:
   - type: web
-    name: vendor-product-research-agent # Updated name
+    name: vendor-product-research-agent
     env: python
     buildCommand: pip install -r requirements.txt
-    # Ensure app.py is the entry point for Streamlit
     startCommand: streamlit run app.py --server.port=$PORT --server.address=0.0.0.0
     envVars:
       - key: GEMINI_API_KEY
         sync: false # Keep API key secure
+      - key: LLM_MODEL
+        value: gemini-2.5-pro-preview-03-25
+      - key: LLM_TEMPERATURE
+        value: 0.2
+    plan: standard # You can change this to your preferred plan
+    autoDeploy: true
+    # The following section optimizes for Streamlit
+    headers:
+      - path: /*
+        name: Cache-Control
+        value: no-cache
+    healthCheckPath: /_stcore/health
+    # Adjust these as needed based on your memory requirements
+    scaling:
+      minInstances: 1
+      maxInstances: 1
+      targetMemoryPercent: 80 # Scale based on memory usage
