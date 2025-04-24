@@ -1252,7 +1252,9 @@ def process_markdown_files(
     
     # Generate output path
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_filename = f"{report_type_name}_{re.sub(r'[\\/*?:\"<>|]', '_', identifier)}_{timestamp}.pdf"
+    # Define the regex pattern outside the f-string to avoid backslash issues
+    safe_identifier = re.sub(r'[\\/*?:"<>|]', '_', identifier)
+    output_filename = f"{report_type_name}_{safe_identifier}_{timestamp}.pdf"
     output_path = pdf_dir / output_filename
     
     # Pass necessary metadata for the template
