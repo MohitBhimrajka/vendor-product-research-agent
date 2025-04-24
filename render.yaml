@@ -14,8 +14,3 @@ services:
     plan: standard # You can change this to your preferred plan
     autoDeploy: true
     healthCheckPath: /_stcore/health
-    # Adjust these as needed based on your memory requirements
-    scaling:
-      minInstances: 1
-      maxInstances: 2 # Must be greater than minInstances
-      targetMemoryPercent: 80 # Scale based on memory usage
