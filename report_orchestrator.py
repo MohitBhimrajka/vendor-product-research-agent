@@ -93,12 +93,19 @@ def format_time(seconds: float) -> str:
     return f"{hours} hours {remaining_minutes} minutes {remaining_seconds:.2f} seconds"
 
 # --- Core Content Generation Logic ---
-def _generate_single_section(client: genai.Client, prompt: str, output_path: Path) -> Dict:
+def _generate_single_section(client: genai.Client, prompt: str, output_path: Path, section_id: str = None, status_dict: Dict = None) -> Dict:
     """Internal function: Generate content for a single prompt/section."""
     start_time = time.time()
     input_tokens = 0
     output_tokens = 0
+    
+    # Update status to running if status_dict is provided
+    if status_dict is not None and section_id is not None:
+        status_dict[section_id] = {"status": "running", "start_time": start_time}
+    
     if shutdown_requested: # Check before starting work
+        if status_dict is not None and section_id is not None:
+            status_dict[section_id] = {"status": "skipped", "error": "Shutdown requested before start", "execution_time": 0}
         return {"status": "skipped", "error": "Shutdown requested before start", "execution_time": 0}
 
     try:
@@ -134,13 +141,25 @@ def _generate_single_section(client: genai.Client, prompt: str, output_path: Pat
             f.write(full_output)
 
         execution_time = time.time() - start_time
-        return {
+        result = {
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "total_tokens": input_tokens + output_tokens,
             "execution_time": execution_time,
             "status": "success"
         }
+        
+        # Update status_dict on success if provided
+        if status_dict is not None and section_id is not None:
+            status_dict[section_id] = {
+                "status": "success",
+                "execution_time": execution_time,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": input_tokens + output_tokens
+            }
+            
+        return result
 
     except Exception as e:
         execution_time = time.time() - start_time
@@ -152,7 +171,7 @@ def _generate_single_section(client: genai.Client, prompt: str, output_path: Pat
         except Exception as write_e:
             logger.error(f"Additionally, failed to write error details to {output_path.name}: {write_e}")
 
-        return {
+        result = {
             "input_tokens": input_tokens,
             "output_tokens": 0,
             "total_tokens": input_tokens,
@@ -160,6 +179,19 @@ def _generate_single_section(client: genai.Client, prompt: str, output_path: Pat
             "status": "error",
             "error": error_message
         }
+        
+        # Update status_dict on error if provided
+        if status_dict is not None and section_id is not None:
+            status_dict[section_id] = {
+                "status": "error",
+                "error": error_message,
+                "execution_time": execution_time,
+                "input_tokens": input_tokens,
+                "output_tokens": 0,
+                "total_tokens": input_tokens
+            }
+            
+        return result
 
 def _generate_report_sections(
     research_mode: str,
@@ -169,6 +201,7 @@ def _generate_report_sections(
     section_order_config: List[Tuple[str, str]], # e.g., VENDOR_SECTION_ORDER
     prompt_func_config: List[Tuple[str, str]], # e.g., VENDOR_PROMPT_FUNCTIONS
     prompt_module: Any, # The imported module (vendor_prompts or product_prompts)
+    status_dict: Dict = None, # New parameter for status tracking
     progress_context=None # Rich progress context
     ) -> Tuple[Optional[Dict], Optional[Path]]:
     """
@@ -225,6 +258,12 @@ def _generate_report_sections(
     except Exception as e:
         logger.warning(f"Could not save generation config: {e}")
 
+    # --- Initialize status dictionary if provided ---
+    if status_dict is not None:
+        for section_id, _ in prompt_func_config:
+            if section_id not in status_dict:  # Initialize only if not already present
+                status_dict[section_id] = {"status": "pending"}
+
     # --- Parallel Section Generation ---
     results = {}
     # Use provided progress context or create a dummy one
@@ -249,6 +288,8 @@ def _generate_report_sections(
             if shutdown_requested:
                 logger.warning(f"Shutdown requested, skipping section: {section_id}")
                 results[section_id] = {"status": "skipped", "error": "Shutdown requested", "execution_time": 0}
+                if status_dict is not None:
+                    status_dict[section_id] = {"status": "skipped", "error": "Shutdown requested", "execution_time": 0}
                 progress.update(section_tasks[section_id], description=f"[yellow]{section_id:.<30}⚠ (Skipped)", completed=1)
                 continue
 
@@ -267,18 +308,23 @@ def _generate_report_sections(
 
                 prompt = prompt_func(**valid_args)
                 output_path = markdown_dir / f"{section_id}.md"
-                future = executor.submit(_generate_single_section, client, prompt, output_path)
+                # Pass section_id and status_dict to _generate_single_section
+                future = executor.submit(_generate_single_section, client, prompt, output_path, section_id, status_dict)
                 futures[future] = section_id
 
             except AttributeError as attr_e:
                  logger.error(f"Prompt function '{prompt_func_name}' not found in module {prompt_module.__name__}. Error: {attr_e}")
                  results[section_id] = {"status": "error", "error": f"Prompt function '{prompt_func_name}' not found in {prompt_module.__name__}.", "execution_time": 0}
+                 if status_dict is not None:
+                     status_dict[section_id] = {"status": "error", "error": f"Prompt function not found: {prompt_func_name}", "execution_time": 0}
                  progress.update(section_tasks[section_id], description=f"[red]{section_id:.<30}✗ (Not Found)", completed=1)
             except Exception as e:
                 logger.error(f"Error preparing prompt for {section_id}: {e}")
                 import traceback
                 logger.error(f"Detailed error trace: {traceback.format_exc()}")
                 results[section_id] = {"status": "error", "error": f"Error preparing prompt: {str(e)}", "execution_time": 0}
+                if status_dict is not None:
+                    status_dict[section_id] = {"status": "error", "error": f"Error preparing prompt: {str(e)}", "execution_time": 0}
                 progress.update(section_tasks[section_id], description=f"[red]{section_id:.<30}✗ (Prompt Error)", completed=1)
 
         logger.info(f"Submitted {len(futures)} sections for generation.") # Log submission
@@ -297,6 +343,8 @@ def _generate_report_sections(
             except Exception as e:
                 logger.error(f"Error retrieving result for {section_id}: {str(e)}")
                 temp_results[section_id] = {"status": "error", "error": f"Future result error: {str(e)}", "execution_time": 0}
+                if status_dict is not None:
+                    status_dict[section_id].update({"status": "error", "error": f"Future result error: {str(e)}"})
             finally:
                  processed_count += 1
                  logger.debug(f"Processed {processed_count}/{len(futures)} futures.")
@@ -313,6 +361,8 @@ def _generate_report_sections(
                       # Mark as interrupted if shutdown happened during wait
                       result['status'] = 'interrupted'
                       result['error'] = 'Shutdown requested during processing'
+                      if status_dict is not None:
+                          status_dict[section_id].update({"status": "interrupted", "error": "Shutdown requested during processing"})
 
                  results[section_id] = result
                  status_char = "✓" if result.get("status") == 'success' else ("✗" if result.get("status") == "error" else "⚠")
@@ -325,6 +375,8 @@ def _generate_report_sections(
                   # Should not happen if submission logic is correct, but handle defensively
                   logger.error(f"No result found for expected section {section_id}")
                   results[section_id] = {"status": "error", "error": "Result missing", "execution_time": 0}
+                  if status_dict is not None:
+                      status_dict[section_id] = {"status": "error", "error": "Result missing", "execution_time": 0}
                   progress.update(section_tasks[section_id], description=f"[red]{section_id:.<30}✗ (Missing Result)", completed=1)
 
              processed_count += 1
@@ -391,6 +443,7 @@ def run_vendor_research(
     vendor_name: str,
     context_company_name: str,
     optional_inputs: Dict,
+    status_dict: Dict = None, # Add status_dict parameter
     progress_context=None # Accept progress context from Streamlit
     ) -> Tuple[Optional[Dict], Optional[Path], Optional[Dict]]: # Added dashboard_data return
     """Runs the full vendor research process and dashboard summary."""
@@ -403,6 +456,7 @@ def run_vendor_research(
         research_mode='vendor', identifier=vendor_name, context_company_name=context_company_name,
         optional_inputs=optional_inputs, section_order_config=VENDOR_SECTION_ORDER, 
         prompt_func_config=VENDOR_PROMPT_FUNCTIONS, prompt_module=vendor_prompts,
+        status_dict=status_dict, # Pass status_dict
         progress_context=progress_context
     )
     
@@ -456,6 +510,7 @@ def run_product_research_initial(
     product_category: str,
     context_company_name: str,
     optional_inputs: Dict,
+    status_dict: Dict = None, # Add status_dict parameter
     progress_context=None
 ) -> Tuple[Optional[Dict], Optional[Path], Optional[List[str]]]:
     """
@@ -474,6 +529,7 @@ def run_product_research_initial(
         section_order_config=PRODUCT_INITIAL_SECTION_ORDER, # Use initial product config
         prompt_func_config=PRODUCT_INITIAL_PROMPT_FUNCTIONS, # Use initial product config
         prompt_module=product_prompts, # Use the product prompts module
+        status_dict=status_dict, # Pass status_dict
         progress_context=progress_context
     )
 
@@ -1135,6 +1191,7 @@ def generate_product_report_phase2(
     optional_inputs: Dict,
     filtered_vendors: List[str],
     comparison_criteria: List[str], # From user selection
+    status_dict: Dict = None, # Add status_dict parameter
     progress_context=None
 ) -> Tuple[Optional[Dict], Optional[Dict]]: # Returns (summary_stats, dashboard_data)
     """
@@ -1245,6 +1302,7 @@ def generate_product_report_phase2(
         },
         "product_relevance.md"
     ))
+
     # Assume recommendations prompt exists
     if hasattr(product_prompts, 'get_product_recommendations_prompt'):
          tasks_to_run.append((
@@ -1259,6 +1317,12 @@ def generate_product_report_phase2(
              },
              "product_recommendations.md"
          ))
+
+    # --- Initialize status dictionary if provided ---
+    if status_dict is not None:
+        for section_id, _, _, _ in tasks_to_run:
+            if section_id not in status_dict:  # Initialize only if not already present
+                status_dict[section_id] = {"status": "pending"}
 
     # --- Execute Phase 2 Tasks ---
     progress = progress_context or Progress(
@@ -1280,6 +1344,8 @@ def generate_product_report_phase2(
         for section_id, prompt_func, args_dict, output_filename in tasks_to_run:
             if shutdown_requested:
                  phase2_results[section_id] = {"status": "skipped", "error": "Shutdown requested", "execution_time": 0}
+                 if status_dict is not None:
+                     status_dict[section_id] = {"status": "skipped", "error": "Shutdown requested", "execution_time": 0}
                  progress.update(section_tasks_p2[section_id], description=f"[yellow]{section_id[:30]:.<30}⚠ (Skipped)", completed=1)
                  continue
             try:
@@ -1290,11 +1356,14 @@ def generate_product_report_phase2(
 
                  prompt = prompt_func(**valid_args)
                  output_path = markdown_dir / output_filename
-                 future = executor.submit(_generate_single_section, client, prompt, output_path)
+                 # Pass section_id and status_dict to _generate_single_section
+                 future = executor.submit(_generate_single_section, client, prompt, output_path, section_id, status_dict)
                  futures[future] = section_id
             except Exception as e:
                  logger.error(f"Error preparing Phase 2 prompt for {section_id}: {e}")
                  phase2_results[section_id] = {"status": "error", "error": f"Error preparing prompt: {e}", "execution_time": 0}
+                 if status_dict is not None:
+                     status_dict[section_id] = {"status": "error", "error": f"Error preparing prompt: {e}", "execution_time": 0}
                  progress.update(section_tasks_p2[section_id], description=f"[red]{section_id[:30]:.<30}✗ (Prompt Error)", completed=1)
 
         processed_count = 0
@@ -1309,15 +1378,18 @@ def generate_product_report_phase2(
                      progress.update(section_tasks_p2[section_id], advance=1, description=f"[{color}]{section_id[:30]:.<30}{status_char}")
                  else:
                      phase2_results[section_id] = {"status": "interrupted", "error": "Shutdown requested during execution", "execution_time": 0}
+                     if status_dict is not None:
+                         status_dict[section_id] = {"status": "interrupted", "error": "Shutdown requested during execution", "execution_time": 0}
                      progress.update(section_tasks_p2[section_id], description=f"[yellow]{section_id[:30]:.<30}⚠ (Interrupted)")
             except Exception as e:
                  logger.error(f"Error processing Phase 2 result for {section_id}: {str(e)}")
                  phase2_results[section_id] = {"status": "error", "error": f"Future result error: {str(e)}", "execution_time": 0}
+                 if status_dict is not None:
+                     status_dict[section_id] = {"status": "error", "error": f"Future result error: {str(e)}", "execution_time": 0}
                  progress.update(section_tasks_p2[section_id], description=f"[red]{section_id[:30]:.<30}✗ (Result Error)", completed=1)
             finally:
                  processed_count += 1
                  progress.update(main_task_p2, completed=processed_count)
-
 
     # --- Compile Stats for Phase 2 ---
     phase2_execution_time = time.time() - phase2_start_time
@@ -1830,6 +1902,7 @@ IMPORTANT: Return ONLY the JSON object, with no additional text, markdown format
 
 # --- Function Aliases for Backward Compatibility ---
 # app.py is importing run_product_research_phase2 but the function is named generate_product_report_phase2
+# Update to include status_dict parameter
 run_product_research_phase2 = generate_product_report_phase2
 
 if __name__ == "__main__":

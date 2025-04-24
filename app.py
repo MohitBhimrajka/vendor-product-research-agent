@@ -5,6 +5,7 @@ from pathlib import Path
 import time # For simulating wait
 import re # For sanitizing identifiers in filenames
 import json # Import json for potentially displaying raw data
+from typing import Dict
 
 # Import orchestrator functions
 from report_orchestrator import (
@@ -15,7 +16,7 @@ from report_orchestrator import (
     trigger_vendor_deep_dives,     # New import
     generate_final_product_report # New import for final step
 )
-from config import OUTPUT_DIR, PRODUCT_FULL_SECTION_ORDER, VENDOR_SECTION_ORDER
+from config import OUTPUT_DIR, PRODUCT_FULL_SECTION_ORDER, VENDOR_SECTION_ORDER, VENDOR_PROMPT_FUNCTIONS, PRODUCT_INITIAL_PROMPT_FUNCTIONS
 # Import PDF generator function
 from pdf_generator import process_markdown_files
 
@@ -77,6 +78,60 @@ def display_pdf(pdf_path: Path):
             st.error(f"Error displaying PDF: {e}")
     else:
         st.error(f"PDF file not found: {pdf_path}")
+
+# --- Helper Function to Display Generation Status ---
+def display_generation_status(status_dict: Dict):
+    if not status_dict:
+        return
+
+    st.subheader("Generation Progress:")
+    cols = st.columns(3) # Adjust columns as needed
+    col_index = 0
+    sorted_sections = sorted(status_dict.keys()) # Display alphabetically or by config order if available
+
+    for section_id in sorted_sections:
+        info = status_dict[section_id]
+        status = info.get("status", "pending")
+        
+        # Determine icon based on status
+        icon = "⏳" if status == "running" else \
+               "✅" if status == "success" else \
+               "❌" if status == "error" else \
+               "⚠️" if status == "skipped" or status == "interrupted" else \
+               "🔄" if status == "pending" else \
+               "❓" # Default unknown icon
+        
+        # Format section name nicely for display
+        section_name = section_id.replace('_', ' ').title()
+        
+        # Create status text with icon
+        status_text = f"{icon} {section_name}"
+        
+        # Add to appropriate column
+        with cols[col_index % len(cols)]:
+            # Apply styling based on status
+            if status == "success":
+                st.markdown(f"<div style='color: green; margin-bottom: 5px;'>{status_text}</div>", unsafe_allow_html=True)
+            elif status == "error":
+                st.markdown(f"<div style='color: red; margin-bottom: 5px;'>{status_text}</div>", unsafe_allow_html=True)
+                # Optionally show error details in expandable section
+                if "error" in info:
+                    with st.expander("Error details", expanded=False):
+                        st.write(info["error"])
+            elif status == "running":
+                st.markdown(f"<div style='color: blue; margin-bottom: 5px;'>{status_text}</div>", unsafe_allow_html=True)
+            elif status in ["skipped", "interrupted"]:
+                st.markdown(f"<div style='color: orange; margin-bottom: 5px;'>{status_text}</div>", unsafe_allow_html=True)
+            else:
+                st.markdown(f"<div style='margin-bottom: 5px;'>{status_text}</div>", unsafe_allow_html=True)
+            
+            # Optionally show timing for completed tasks
+            if status == "success" and "execution_time" in info:
+                st.caption(f"Done in {info['execution_time']:.1f}s")
+        
+        col_index += 1
+    
+    st.divider()
 
 # --- Helper Function to Display Dashboard ---
 def display_dashboard(dashboard_data):
@@ -255,6 +310,7 @@ def reset_state():
                 'final_pdf_in_progress', 'trigger_final_product_report']:
         if key in st.session_state:
             st.session_state[key] = False
+    st.session_state.generation_status = {} # Reset generation status
 
 # --- Initialize Session State ---
 if 'report_generated' not in st.session_state:
@@ -271,6 +327,8 @@ if 'dashboard_data' not in st.session_state:
     st.session_state.dashboard_data = None # For vendor mode or final product mode
 if 'phase2_dashboard_data' not in st.session_state:
     st.session_state.phase2_dashboard_data = None # For product mode after phase 2
+if 'generation_status' not in st.session_state:
+    st.session_state.generation_status = {} # Holds status of each section
 
 # New unified state management
 if 'current_task' not in st.session_state:
@@ -386,6 +444,7 @@ with st.sidebar:
         st.session_state.final_pdf_generated = False
         st.session_state.final_pdf_in_progress = False
         st.session_state.optional_inputs_storage = {}
+        st.session_state.generation_status = {} # Reset generation status
 
     # 1. Mode Selection
     research_mode = st.selectbox(
@@ -487,28 +546,42 @@ with st.sidebar:
 # --- Generation Execution Block ---
 if st.session_state.current_task in ["generating_vendor_report", "generating_product_initial"] or \
    (not hasattr(st.session_state, 'current_task') and st.session_state.generation_in_progress):
-    st.header("⚙️ Processing Your Request...")
-    progress_bar = st.progress(0)
     
-    # Main progress message (could be customized based on mode)
-    processing_msg = f"Generating {'vendor' if st.session_state.current_mode == 'Vendor Research' else 'product'} research report..."
+    # --- Initialize status dict at the start of generation if empty ---
+    if not st.session_state.generation_status:
+        # Determine which sections will be run based on mode
+        if st.session_state.current_mode == "Vendor Research":
+            sections_to_run = [s[0] for s in VENDOR_PROMPT_FUNCTIONS]
+        elif st.session_state.current_mode == "Product Research":
+            sections_to_run = [s[0] for s in PRODUCT_INITIAL_PROMPT_FUNCTIONS]
+        else:
+            sections_to_run = []
+        # Initialize status dictionary
+        st.session_state.generation_status = {sec_id: {"status": "pending"} for sec_id in sections_to_run}
+
+    st.header("⚙️ Processing Your Request...")
+    # Replace the progress bar with status display
+    # progress_bar = st.progress(0)
     status_text = st.empty()
-    status_text.text(processing_msg)
+    status_text.info("Running report generation... please wait. Status updates below.")
+    
+    # --- Display the generation status ---
+    display_generation_status(st.session_state.generation_status)
     
     try:
-        success = False
-        with st.spinner("Running report generation..."):
-            # Remove delay to maximize throughput
-            # time.sleep(0.5) # Short delay for UI feedback
+        # Only run the generation logic if we haven't completed yet
+        if 'generation_complete' not in st.session_state or not st.session_state.generation_complete:
+            success = False
             
             if st.session_state.current_mode == "Vendor Research":
                 vendor_name = st.session_state.vendor_name
                 
-                # Modify to handle dashboard data return
+                # Pass status_dict to orchestrator
                 token_stats, pdf_path_result, dashboard_result = run_vendor_research(
                     vendor_name=vendor_name,
                     context_company_name=context_company_name,
-                    optional_inputs=optional_inputs
+                    optional_inputs=optional_inputs,
+                    status_dict=st.session_state.generation_status  # Pass status dictionary
                 )
                 
                 # Store in session state
@@ -517,17 +590,17 @@ if st.session_state.current_task in ["generating_vendor_report", "generating_pro
                 st.session_state.pdf_path = pdf_path_result
                 st.session_state.dashboard_data = dashboard_result # Store dashboard data
                 
-                progress_bar.progress(100)
-                status_text.text(f"Completed vendor research for: {vendor_name}")
+                # status_text.text(f"Completed vendor research for: {vendor_name}")
                 
             elif st.session_state.current_mode == "Product Research":
                 product_category = st.session_state.product_identifier
                 
-                # Initial product analysis still returns the same data
+                # Pass status_dict to orchestrator
                 token_stats, base_dir_result, questions_result = run_product_research_initial(
                     product_category=product_category,
                     context_company_name=context_company_name,
-                    optional_inputs=optional_inputs
+                    optional_inputs=optional_inputs,
+                    status_dict=st.session_state.generation_status  # Pass status dictionary
                 )
                 
                 # Store initial results
@@ -541,41 +614,62 @@ if st.session_state.current_task in ["generating_vendor_report", "generating_pro
                     st.session_state.filter_messages = [{"role": "assistant", "content": questions_result[0]}]
                     st.session_state.current_question_index = 0
                 
-                progress_bar.progress(100)
-                status_text.text(f"Completed initial analysis for: {product_category}")
+                # status_text.text(f"Completed initial analysis for: {product_category}")
             
-            success = bool(token_stats)
+            success = bool(token_stats and not token_stats.get('summary', {}).get('was_interrupted', False))
+            st.session_state.generation_complete = True
+            st.session_state.generation_success = success
                 
     except Exception as e:
         st.error(f"Error during generation: {str(e)}")
         st.session_state.error_message = str(e)
         import traceback
         print(f"Generation Error: {traceback.format_exc()}")
-        success = False
+        st.session_state.generation_complete = True
+        st.session_state.generation_success = False
         
     finally:
-        st.session_state.generation_in_progress = False # Reset legacy flag regardless
-        # UI feedback based on success/failure
-        if success:
-            st.success("Report generation completed successfully!")
-            # Update current_task based on the mode and completion status
-            if st.session_state.current_mode == "Vendor Research":
-                st.session_state.current_task = "vendor_report_completed"
-            elif st.session_state.current_mode == "Product Research":
-                # Decide the next state based on whether questions were generated
-                if st.session_state.filtering_questions:
-                    st.session_state.current_task = "awaiting_filter_input"
-                else:
-                    # If no questions, transition to awaiting_filter_input but show a warning
-                    st.session_state.current_task = "awaiting_filter_input"
-                    st.warning("Initial analysis complete, but no filtering questions were generated.")
-        else:
-            st.error("Report generation encountered an error. See details below.")
-            # Reset task on failure to allow retry from the start
-            st.session_state.current_task = None
-        # Remove delay to maximize throughput
-        # time.sleep(1) # Brief delay for feedback
-        st.rerun() # Refresh the app to show results
+        # Check if generation has completed
+        if st.session_state.get('generation_complete', False):
+            st.session_state.generation_in_progress = False # Stop the rerun loop
+            
+            # Clear the 'Running...' status text
+            status_text.empty()
+            
+            # Show final status
+            display_generation_status(st.session_state.generation_status)
+            
+            if st.session_state.get('generation_success', False):
+                st.success("Report generation completed successfully!")
+                # Update current_task based on the mode and completion status
+                if st.session_state.current_mode == "Vendor Research":
+                    st.session_state.current_task = "vendor_report_completed"
+                elif st.session_state.current_mode == "Product Research":
+                    if st.session_state.filtering_questions:
+                        st.session_state.current_task = "awaiting_filter_input"
+                    else:
+                        st.session_state.current_task = "awaiting_filter_input"
+                        st.warning("Initial analysis complete, but no filtering questions were generated.")
+            else:
+                st.error("Report generation encountered an error or was interrupted.")
+                # Reset task on failure to allow retry from the start
+                st.session_state.current_task = None
+            
+            # Reset temporary flags
+            if 'generation_complete' in st.session_state:
+                del st.session_state.generation_complete
+            if 'generation_success' in st.session_state:
+                del st.session_state.generation_success
+                
+            # Final rerun to show results
+            time.sleep(0.5)
+            st.rerun()
+    
+    # --- Add rerun loop to update status display ---
+    # If generation is still in progress, wait and rerun to get status updates
+    if st.session_state.get('generation_in_progress', False):
+        time.sleep(2)  # Wait 2 seconds before next check
+        st.rerun()  # Rerun the script to update the UI
 
 # --- Filtering Execution Block ---
 if st.session_state.current_task == "filtering_vendors" or \
@@ -634,24 +728,38 @@ if st.session_state.current_task == "filtering_vendors" or \
          st.rerun() # Update UI with filtering results
 
 # --- Phase 2 Execution Block (Vendor Comparison Matrix, etc.) ---
-if st.session_state.current_task == "generating_phase2":
+if st.session_state.current_task == "generating_phase2": # NEW Check
+    # --- Initialize status dict for phase 2 if empty ---
+    if not st.session_state.generation_status:
+        # Determine sections for phase 2 (profiles, comparison, etc.)
+        phase2_sections = ["comparison_matrix", "product_relevance", "product_recommendations"]
+        if st.session_state.filtered_vendors:
+             # Add profile sections for each vendor
+             phase2_sections.extend([f"profile_{re.sub(r'[^a-zA-Z0-9_]', '_', v)}" for v in st.session_state.filtered_vendors])
+        # Initialize status dictionary
+        st.session_state.generation_status = {sec_id: {"status": "pending"} for sec_id in phase2_sections}
+
     st.header("⚙️ Generating Profiles, Comparison & Recommendations...")
+    status_text_p2 = st.empty()
+    status_text_p2.info("Running Phase 2 processing... Status updates below.")
+    
+    # Display Phase 2 generation status
+    display_generation_status(st.session_state.generation_status)
+    
     try:
-        success = False
-        with st.spinner("Running Phase 2 processing..."):
-            base_dir = Path(st.session_state.product_base_dir)
-            product_category = st.session_state.product_identifier
-            filtered_vendors = st.session_state.filtered_vendors
-            comparison_criteria = st.session_state.selected_comparison_criteria
+        # Only run the generation logic if we haven't completed yet
+        if 'phase2_complete' not in st.session_state or not st.session_state.phase2_complete:
+            success = False
             
-            # Modified to handle dashboard data return
+            # Pass the status_dict to run_product_research_phase2
             phase2_summary, phase2_dashboard_data = run_product_research_phase2(
-                base_dir=base_dir,
-                product_category=product_category,
+                base_dir=Path(st.session_state.product_base_dir),
+                product_category=st.session_state.product_identifier,
                 context_company_name=context_company_name,
                 optional_inputs=optional_inputs,
-                filtered_vendors=filtered_vendors,
-                comparison_criteria=comparison_criteria
+                filtered_vendors=st.session_state.filtered_vendors,
+                comparison_criteria=st.session_state.selected_comparison_criteria,
+                status_dict=st.session_state.generation_status  # Pass status dictionary
             )
             
             # Store in session state
@@ -660,25 +768,52 @@ if st.session_state.current_task == "generating_phase2":
                 st.session_state.phase2_summary = phase2_summary
                 st.session_state.phase2_dashboard_data = phase2_dashboard_data # Store dashboard data
                 success = True
-                
+            
+            st.session_state.phase2_complete = True
+            st.session_state.phase2_success = success
+    
     except Exception as e:
         st.error(f"Error during Phase 2 processing: {str(e)}")
         import traceback
         print(f"Phase 2 Error: {traceback.format_exc()}")
-        success = False
+        st.session_state.phase2_complete = True
+        st.session_state.phase2_success = False
+        
     finally:
-        # --- ADD STATE TRANSITION ---
-        st.session_state.phase2_in_progress = False # Reset legacy flag
-        if success:
-            st.success("Phase 2 completed successfully!")
-            st.session_state.phase2_run_complete = True # Set legacy completion flag
-            st.session_state.current_task = "awaiting_deepdive_selection" # Transition state
-        else:
-            st.error("Phase 2 processing encountered an error.")
-            # Revert state on error
-            st.session_state.current_task = "displaying_filtered_results" # Go back to comparison setup
-        st.rerun()
-        # --- END STATE TRANSITION ---
+        # Check if phase 2 has completed
+        if st.session_state.get('phase2_complete', False):
+            st.session_state.phase2_in_progress = False # Stop the rerun loop
+            
+            # Clear the 'Running...' status text
+            status_text_p2.empty()
+            
+            # Show final status
+            display_generation_status(st.session_state.generation_status)
+            
+            # --- ADD STATE TRANSITION ---
+            if st.session_state.get('phase2_success', False):
+                st.success("Phase 2 completed successfully!")
+                st.session_state.phase2_run_complete = True # Set legacy completion flag
+                st.session_state.current_task = "awaiting_deepdive_selection" # Transition state
+            else:
+                st.error("Phase 2 processing encountered an error.")
+                # Revert state on error
+                st.session_state.current_task = "displaying_filtered_results" # Go back to comparison setup
+            
+            # Reset temporary flags
+            if 'phase2_complete' in st.session_state:
+                del st.session_state.phase2_complete
+            if 'phase2_success' in st.session_state:
+                del st.session_state.phase2_success
+                
+            st.rerun()
+            # --- END STATE TRANSITION ---
+    
+    # --- Add rerun loop to update status display ---
+    # If phase 2 is still in progress, wait and rerun to get status updates
+    if st.session_state.get('phase2_in_progress', False):
+        time.sleep(2)  # Wait 2 seconds before next check
+        st.rerun()  # Rerun the script to update the UI
 
 # --- Deep Dive Execution Block ---
 if st.session_state.current_task == "generating_deepdives": # Check if task is deep dive generation
@@ -779,6 +914,19 @@ if st.session_state.current_task == "generating_final_pdf": # NEW Check
 # --- Display Area ---
 st.header("📊 Research Results & Next Steps")
 
+# --- Display final status if generation just completed ---
+if not st.session_state.get('generation_in_progress', False) and \
+   not st.session_state.get('phase2_in_progress', False) and \
+   st.session_state.generation_status:
+    # Check if any sections are still running (shouldn't be, but just in case)
+    if any(info.get('status') == 'running' for info in st.session_state.generation_status.values()):
+        st.warning("Generation process ended, but some tasks might still be marked as running. Displaying last known status.")
+    
+    # Display final status only if we have something to show and results aren't loaded yet
+    if not st.session_state.get('report_generated', False) or \
+       (st.session_state.current_mode == "Product Research" and not st.session_state.get('product_initial_run_complete', False)):
+        display_generation_status(st.session_state.generation_status)
+
 # Display Vendor Mode Results
 if research_mode == "Vendor Research":
     if st.session_state.dashboard_data: 
@@ -835,6 +983,15 @@ elif research_mode == "Product Research":
     if st.session_state.current_task == "awaiting_filter_input":
         st.subheader("Filter Vendors Based on Your Needs")
         st.info("Please answer the questions below to help narrow down the vendor list.")
+
+        # Display initial analysis PDF if available
+        if st.session_state.product_base_dir:
+            initial_pdf_dir = Path(st.session_state.product_base_dir) / "pdf"
+            if initial_pdf_dir.exists():
+                pdf_files = list(initial_pdf_dir.glob("ProductInitialAnalysis_*.pdf"))
+                if pdf_files:
+                    with st.expander("View Initial Product Analysis Report", expanded=False):
+                        display_pdf(pdf_files[0])
 
         # Display chat messages
         if "filter_messages" not in st.session_state:
@@ -944,6 +1101,11 @@ elif research_mode == "Product Research":
     # Stage 3: Phase 2 Done, Display Intermediate Results, Awaiting Deep Dive Trigger
     elif st.session_state.current_task == "awaiting_deepdive_selection":
         st.subheader("Phase 2 Results: Profiles & Comparison")
+        
+        # --- Display final generation status from Phase 2 ---
+        if st.session_state.generation_status:
+            display_generation_status(st.session_state.generation_status)
+        
         if st.session_state.phase2_dashboard_data: 
             display_dashboard(st.session_state.phase2_dashboard_data) # Display Phase 2 Dashboard
         
