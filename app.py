@@ -319,8 +319,11 @@ elif st.session_state.state == AppState.AWAITING_FILTER:
             col1, col2 = st.columns([3, 1])
             with col2:
                 if st.button("Next", type="primary" if q_idx < total_q-1 else "secondary", use_container_width=True):
-                    st.session_state.answers.append(ans)
-                st.rerun()
+                    if ans:  # Only append if there's an answer
+                        st.session_state.answers.append(ans)
+                        st.rerun()
+                    else:
+                        st.warning("Please provide an answer before proceeding.")
         else:
             st.success("All questions answered! You can now filter vendors based on your criteria.")
             if st.button("Filter vendors", type="primary"):
