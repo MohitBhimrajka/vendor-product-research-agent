@@ -269,7 +269,7 @@ elif st.session_state.state == AppState.AWAITING_FILTER:
             st.markdown('</div>', unsafe_allow_html=True)
             if initial_pdf and initial_pdf.exists():
                 col1, col2 = st.columns([3, 1])
-                with col2:
+    with col2:
                     with open(initial_pdf, "rb") as f:
                         st.download_button(
                             label="📥 Download Initial Report",
@@ -279,12 +279,12 @@ elif st.session_state.state == AppState.AWAITING_FILTER:
                             use_container_width=True
                         )
         
-        with tab2:
+    with tab2:
             # Show full markdown tabs
             ui.markdown_tabs(markdown_dir)
-    
+
     st.divider()
-    
+
     # Q&A section with progress indicator and better styling
     st.subheader("🔍 Filtering Questions")
     
@@ -320,7 +320,7 @@ elif st.session_state.state == AppState.AWAITING_FILTER:
             with col2:
                 if st.button("Next", type="primary" if q_idx < total_q-1 else "secondary", use_container_width=True):
                     st.session_state.answers.append(ans)
-                    st.rerun()
+                st.rerun()
         else:
             st.success("All questions answered! You can now filter vendors based on your criteria.")
             if st.button("Filter vendors", type="primary"):
@@ -449,55 +449,55 @@ elif st.session_state.state == AppState.AWAITING_PHASE2:
             st.session_state.criteria = selected_criteria
             st.session_state.state = AppState.GENERATING_PHASE2
             st.rerun()
-    else:
-        st.warning("No vendors were filtered based on your criteria.")
-        # Provide options for the user with better visual distinction
-        st.subheader("Options")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("""
-            <div style="background-color: #f8f9fa; padding: 15px; border-radius: 10px; height: 100%;">
-                <h4 style="margin-top: 0;">Retry Filtering</h4>
-                <p>Return to the filtering questions and provide different answers.</p>
-            </div>
-            """, unsafe_allow_html=True)
-            if st.button("Return to questions", key="return_to_filter", use_container_width=True):
-                st.session_state.answers = []  # Reset answers
-                st.session_state.state = AppState.AWAITING_FILTER
-                st.rerun()
-        
-        with col2:
-            st.markdown("""
-            <div style="background-color: #f8f9fa; padding: 15px; border-radius: 10px; height: 100%;">
-                <h4 style="margin-top: 0;">Manual Selection</h4>
-                <p>Choose vendors manually from the complete list of identified options.</p>
-            </div>
-            """, unsafe_allow_html=True)
-            if st.button("Select manually", key="skip_to_manual", use_container_width=True):
-                st.session_state.state = AppState.AWAITING_PHASE2
-                # Retrieve all identified vendors from the product_vendor_identification.md file
-                try:
-                    output_dir = Path(st.session_state.product_data_dir)
-                    vendor_file = output_dir / "markdown" / "product_vendor_identification.md"
-                    if vendor_file.exists():
-                        import re
-                        with open(vendor_file, 'r') as f:
-                            content = f.read()
-                        # Simple extraction of vendor names - improve this if needed
-                        vendors = []
-                        for line in content.split('\n'):
-                            if line.strip().startswith('- ') or line.strip().startswith('* '):
-                                vendor = line.strip()[2:].strip()
-                                if vendor and not vendor.startswith('[') and not vendor.endswith('...]'):
-                                    vendors.append(vendor)
-                        if vendors:
-                            st.session_state.filtered_vendors = vendors
-                    else:
-                        st.info("No vendor identification file found. Please enter vendors manually.")
-                except Exception as e:
-                    st.error(f"Error retrieving vendors: {e}")
-                st.rerun()
+        else:
+            st.warning("No vendors were filtered based on your criteria.")
+            # Provide options for the user with better visual distinction
+            st.subheader("Options")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("""
+                <div style="background-color: #f8f9fa; padding: 15px; border-radius: 10px; height: 100%;">
+                    <h4 style="margin-top: 0;">Retry Filtering</h4>
+                    <p>Return to the filtering questions and provide different answers.</p>
+                </div>
+                """, unsafe_allow_html=True)
+                if st.button("Return to questions", key="return_to_filter", use_container_width=True):
+                    st.session_state.answers = []  # Reset answers
+                    st.session_state.state = AppState.AWAITING_FILTER
+                    st.rerun()
+            
+            with col2:
+                st.markdown("""
+                <div style="background-color: #f8f9fa; padding: 15px; border-radius: 10px; height: 100%;">
+                    <h4 style="margin-top: 0;">Manual Selection</h4>
+                    <p>Choose vendors manually from the complete list of identified options.</p>
+                </div>
+                """, unsafe_allow_html=True)
+                if st.button("Select manually", key="skip_to_manual", use_container_width=True):
+                    st.session_state.state = AppState.AWAITING_PHASE2
+                    # Retrieve all identified vendors from the product_vendor_identification.md file
+                    try:
+                        output_dir = Path(st.session_state.product_data_dir)
+                        vendor_file = output_dir / "markdown" / "product_vendor_identification.md"
+                        if vendor_file.exists():
+                            import re
+                            with open(vendor_file, 'r') as f:
+                                content = f.read()
+                            # Simple extraction of vendor names - improve this if needed
+                            vendors = []
+                            for line in content.split('\n'):
+                                if line.strip().startswith('- ') or line.strip().startswith('* '):
+                                    vendor = line.strip()[2:].strip()
+                                    if vendor and not vendor.startswith('[') and not vendor.endswith('...]'):
+                                        vendors.append(vendor)
+                            if vendors:
+                                st.session_state.filtered_vendors = vendors
+                            else:
+                                st.info("No vendor identification file found. Please enter vendors manually.")
+                    except Exception as e:
+                        st.error(f"Error retrieving vendors: {e}")
+                    st.rerun()
 
 # Phase 2 generation - profiles and comparison matrix
 elif st.session_state.state == AppState.GENERATING_PHASE2:
@@ -649,7 +649,7 @@ elif st.session_state.state == AppState.AWAITING_DEEPDIVE:
             if st.button("Run Deep-Dive Analysis", type="primary", use_container_width=True):
                 st.session_state.deep_vendors = selected_vendors
                 st.session_state.state = AppState.GENERATING_DEEPDIVE
-                st.rerun()
+            st.rerun()
     with col2:
         button_text = "Skip Deep-Dive" if not selected_vendors else "Proceed to Final Report"
         if st.button(button_text, type="secondary", use_container_width=True):
@@ -777,10 +777,10 @@ elif st.session_state.state == AppState.AWAITING_FINAL:
                                         key=f"download_{vendor}",
                                         use_container_width=True,
                                     )
-                                
+            
                                 st.markdown(f"<small>Saved to: {Path(pdf_path).name}</small>", unsafe_allow_html=True)
                                 st.markdown("</div>", unsafe_allow_html=True)
-                                
+            
                                 # Display vendor-specific stats
                                 if stats and stats.get('summary'):
                                     with st.container():
