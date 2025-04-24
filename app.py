@@ -339,169 +339,194 @@ elif st.session_state.state == AppState.AWAITING_FILTER:
 # Filtering stage - runs the filter on user's answers
 elif st.session_state.state == AppState.FILTERING:
     ui.status_bar()
+    vendors_found = None  # Temporary variable to hold the result
     with st.status("Filtering vendors …", expanded=True) as s:
-        st.session_state.filtered_vendors = run_filter(
+        vendors_found = run_filter(
             Path(st.session_state.product_data_dir),
             st.session_state.questions,
             st.session_state.answers,
             st.session_state.gen_status
         )
-        st.session_state.state = AppState.AWAITING_PHASE2
         s.update(label="✅ finished", state="complete")
-        st.rerun()
+    
+    # Set state and filtered vendors AFTER the status block closes
+    st.session_state.filtered_vendors = vendors_found
+    st.session_state.state = AppState.AWAITING_PHASE2
+    
+    # Trigger the rerun AFTER state is fully set and status block is closed
+    st.rerun()
 
 # (3) choose comparison & run phase-2
 elif st.session_state.state == AppState.AWAITING_PHASE2:
+    # --- Debugging Start ---
+    st.write(f"DEBUG: Entered AWAITING_PHASE2 state.") 
+    st.write(f"DEBUG: Filtered Vendors type: {type(st.session_state.filtered_vendors)}")
+    st.write(f"DEBUG: Filtered Vendors value: {st.session_state.filtered_vendors}")
+    # --- Debugging End ---
+    
     # Display filtered vendors if any
     if st.session_state.filtered_vendors:
-        # Show status summary
-        st.markdown("""
-        <style>
-        .vendor-card {
-            background-color: #f8f9fa;
-            border-radius: 10px;
-            padding: 15px;
-            text-align: center;
-            height: 100%;
-            border: 1px solid #e9ecef;
-            transition: transform 0.2s, box-shadow 0.2s;
-        }
-        .vendor-card:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
-        }
-        .vendor-name {
-            font-weight: bold;
-            font-size: 1.2em;
-            margin-bottom: 10px;
-            color: #495057;
-        }
-        .criteria-option {
-            display: flex;
-            align-items: center;
-            padding: 10px;
-            background-color: #f8f9fa;
-            border-radius: 5px;
-            margin-bottom: 8px;
-            border: 1px solid #e9ecef;
-            cursor: pointer;
-        }
-        .criteria-option:hover {
-            background-color: #e9ecef;
-        }
-        </style>
-        <div style="background-color: #d4edda; padding: 10px 15px; border-radius: 5px; margin-bottom: 20px;">
-            <h3 style="margin: 0; color: #155724;">✅ Vendor Filtering Complete</h3>
-            <p style="margin: 5px 0 0 0; color: #155724;">
-                Based on your answers, we've identified {len(st.session_state.filtered_vendors)} suitable vendors.
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # Vendor cards in a visually appealing grid
-        st.subheader("Selected Vendors")
-        
-        # Create a grid of cards with equal height
-        num_cols = min(3, len(st.session_state.filtered_vendors))
-        cols = st.columns(num_cols)
-        
-        for i, vendor in enumerate(st.session_state.filtered_vendors):
-            with cols[i % num_cols]:
-                st.markdown(f"""
-                <div class="vendor-card">
-                    <div class="vendor-name">{vendor}</div>
-                    <div style="font-size: 2em; margin: 10px 0;">{"🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else "🏅"}</div>
-                </div>
-                <br>
-                """, unsafe_allow_html=True)
-        
-        st.divider()
-        
-        # Comparison criteria selector with visual improvements
-        st.subheader("Select Comparison Criteria")
-        st.markdown("Choose criteria for comparing these vendors in the analysis:")
-        
-        # Default criteria options
-        criteria_options = [
-            ("Core features", "Essential product capabilities and functionalities", True),
-            ("Tech stack", "Technology infrastructure and implementation details", True),
-            ("Pricing", "Cost models, pricing tiers, and payment structures", True),
-            ("Support", "Service levels, customer support, and assistance options", False),
-            ("Certifications", "Industry standards, compliance, and certification details", False)
-        ]
-        
-        # Create a more visual selection interface
-        selected_criteria = []
-        for option, description, default in criteria_options:
-            col1, col2 = st.columns([5, 1])
-            with col1:
-                st.markdown(f"""
-                <div style="padding: 5px 0;">
-                    <div style="font-weight: bold;">{option}</div>
-                    <div style="color: #6c757d; font-size: 0.9em;">{description}</div>
-                </div>
-                """, unsafe_allow_html=True)
-            with col2:
-                if st.checkbox(option, value=default, key=f"criteria_{option}", label_visibility="collapsed"):
-                    selected_criteria.append(option)
-        
-        st.markdown("<br>", unsafe_allow_html=True)
-        
-        # Visually differentiate the CTA button
-        if st.button("Generate Comparison Matrix & Profiles", type="primary", disabled=not selected_criteria, use_container_width=True):
-            st.session_state.criteria = selected_criteria
-            st.session_state.state = AppState.GENERATING_PHASE2
-            st.rerun()
-        else:
-            st.warning("No vendors were filtered based on your criteria.")
-            # Provide options for the user with better visual distinction
-            st.subheader("Options")
+        try:
+            # Show status summary
+            st.markdown("""
+            <style>
+            .vendor-card {
+                background-color: #f8f9fa;
+                border-radius: 10px;
+                padding: 15px;
+                text-align: center;
+                height: 100%;
+                border: 1px solid #e9ecef;
+                transition: transform 0.2s, box-shadow 0.2s;
+            }
+            .vendor-card:hover {
+                transform: translateY(-5px);
+                box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+            }
+            .vendor-name {
+                font-weight: bold;
+                font-size: 1.2em;
+                margin-bottom: 10px;
+                color: #495057;
+            }
+            .criteria-option {
+                display: flex;
+                align-items: center;
+                padding: 10px;
+                background-color: #f8f9fa;
+                border-radius: 5px;
+                margin-bottom: 8px;
+                border: 1px solid #e9ecef;
+                cursor: pointer;
+            }
+            .criteria-option:hover {
+                background-color: #e9ecef;
+            }
+            </style>
+            <div style="background-color: #d4edda; padding: 10px 15px; border-radius: 5px; margin-bottom: 20px;">
+                <h3 style="margin: 0; color: #155724;">✅ Vendor Filtering Complete</h3>
+                <p style="margin: 5px 0 0 0; color: #155724;">
+                    Based on your answers, we've identified {len(st.session_state.filtered_vendors)} suitable vendors.
+                </p>
+            </div>
+            """, unsafe_allow_html=True)
             
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("""
-                <div style="background-color: #f8f9fa; padding: 15px; border-radius: 10px; height: 100%;">
-                    <h4 style="margin-top: 0;">Retry Filtering</h4>
-                    <p>Return to the filtering questions and provide different answers.</p>
-                </div>
-                """, unsafe_allow_html=True)
-                if st.button("Return to questions", key="return_to_filter", use_container_width=True):
-                    st.session_state.answers = []  # Reset answers
-                    st.session_state.state = AppState.AWAITING_FILTER
-            st.rerun()
+            # Vendor cards in a visually appealing grid
+            st.subheader("Selected Vendors")
             
-            with col2:
-                st.markdown("""
-                <div style="background-color: #f8f9fa; padding: 15px; border-radius: 10px; height: 100%;">
-                    <h4 style="margin-top: 0;">Manual Selection</h4>
-                    <p>Choose vendors manually from the complete list of identified options.</p>
-                </div>
-                """, unsafe_allow_html=True)
-                if st.button("Select manually", key="skip_to_manual", use_container_width=True):
-                    # Retrieve all identified vendors from the product_vendor_identification.md file
-                    try:
-                        output_dir = Path(st.session_state.product_data_dir)
-                        vendor_file = output_dir / "markdown" / "product_vendor_identification.md"
-                        if vendor_file.exists():
-                            import re
-                            with open(vendor_file, 'r') as f:
-                                content = f.read()
-                            # Simple extraction of vendor names - improve this if needed
-                            vendors = []
-                            for line in content.split('\n'):
-                                if line.strip().startswith('- ') or line.strip().startswith('* '):
-                                    vendor = line.strip()[2:].strip()
+            # Create a grid of cards with equal height
+            num_cols = min(3, len(st.session_state.filtered_vendors))
+            cols = st.columns(num_cols)
+            
+            for i, vendor in enumerate(st.session_state.filtered_vendors):
+                with cols[i % num_cols]:
+                    st.markdown(f"""
+                    <div class="vendor-card">
+                        <div class="vendor-name">{vendor}</div>
+                        <div style="font-size: 2em; margin: 10px 0;">{"🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else "🏅"}</div>
+                    </div>
+                    <br>
+                    """, unsafe_allow_html=True)
+            
+            st.divider()
+            
+            # Comparison criteria selector with visual improvements
+            st.subheader("Select Comparison Criteria")
+            st.markdown("Choose criteria for comparing these vendors in the analysis:")
+            
+            # Default criteria options
+            criteria_options = [
+                ("Core features", "Essential product capabilities and functionalities", True),
+                ("Tech stack", "Technology infrastructure and implementation details", True),
+                ("Pricing", "Cost models, pricing tiers, and payment structures", True),
+                ("Support", "Service levels, customer support, and assistance options", False),
+                ("Certifications", "Industry standards, compliance, and certification details", False)
+            ]
+            
+            # Create a more visual selection interface
+            selected_criteria = []
+            for option, description, default in criteria_options:
+                col1, col2 = st.columns([5, 1])
+                with col1:
+                    st.markdown(f"""
+                    <div style="padding: 5px 0;">
+                        <div style="font-weight: bold;">{option}</div>
+                        <div style="color: #6c757d; font-size: 0.9em;">{description}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with col2:
+                    if st.checkbox(option, value=default, key=f"criteria_{option}", label_visibility="collapsed"):
+                        selected_criteria.append(option)
+            
+            st.markdown("<br>", unsafe_allow_html=True)
+            
+            # Visually differentiate the CTA button
+            if st.button("Generate Comparison Matrix & Profiles", type="primary", disabled=not selected_criteria, use_container_width=True):
+                st.session_state.criteria = selected_criteria
+                st.session_state.state = AppState.GENERATING_PHASE2
+                st.rerun()
+                
+            st.write("DEBUG: Successfully rendered the 'if filtered_vendors' block.")
+            
+        except Exception as e:
+            st.exception(e) # Display any exception that occurs here
+            st.error("ERROR occurred rendering the vendor/criteria selection block!")
+    else:
+        st.warning("No vendors were filtered based on your criteria.")
+        # Provide options for the user with better visual distinction
+        st.subheader("Options")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("""
+            <div style="background-color: #f8f9fa; padding: 15px; border-radius: 10px; height: 100%;">
+                <h4 style="margin-top: 0;">Retry Filtering</h4>
+                <p>Return to the filtering questions and provide different answers.</p>
+            </div>
+            """, unsafe_allow_html=True)
+            if st.button("Return to questions", key="return_to_filter", use_container_width=True):
+                st.session_state.answers = []  # Reset answers
+                st.session_state.state = AppState.AWAITING_FILTER
+                st.rerun()
+        
+        with col2:
+            st.markdown("""
+            <div style="background-color: #f8f9fa; padding: 15px; border-radius: 10px; height: 100%;">
+                <h4 style="margin-top: 0;">Manual Selection</h4>
+                <p>Choose vendors manually from the complete list of identified options.</p>
+            </div>
+            """, unsafe_allow_html=True)
+            if st.button("Select manually", key="skip_to_manual", use_container_width=True):
+                # Retrieve all identified vendors from the product_vendor_identification.md file
+                try:
+                    output_dir = Path(st.session_state.product_data_dir)
+                    vendor_file = output_dir / "markdown" / "product_vendor_identification.md"
+                    if vendor_file.exists():
+                        import re
+                        with open(vendor_file, 'r') as f:
+                            content = f.read()
+                        # Simple extraction of vendor names - improve this if needed
+                        vendors = []
+                        vendor_list_match = re.search(r"VENDOR_LIST_START\s*\n(.*?)\s*VENDOR_LIST_END", content, re.DOTALL)
+                        if vendor_list_match:
+                            vendor_list_text = vendor_list_match.group(1).strip()
+                            vendor_lines = [line.strip() for line in vendor_list_text.split('\n')]
+                            for line in vendor_lines:
+                                if line.startswith('-') or line.startswith('*'):
+                                    vendor = line[1:].strip()
                                     if vendor and not vendor.startswith('[') and not vendor.endswith('...]'):
                                         vendors.append(vendor)
-                            if vendors:
-                                st.session_state.filtered_vendors = vendors
-                            else:
-                                st.info("No vendor identification file found. Please enter vendors manually.")
-                    except Exception as e:
-                        st.error(f"Error retrieving vendors: {e}")
-                    st.rerun()
-    else:
-        st.info("No vendor identification file found. Please enter vendors manually.")
+                        
+                        if vendors:
+                            st.session_state.filtered_vendors = vendors
+                            st.session_state.state = AppState.AWAITING_PHASE2
+                            st.rerun()
+                        else:
+                            st.error("Could not extract any vendors from the vendor identification file.")
+                    else:
+                        st.error("Vendor identification file not found.")
+                except Exception as e:
+                    st.error(f"Error retrieving vendors: {str(e)}")
 
 # Phase 2 generation - profiles and comparison matrix
 elif st.session_state.state == AppState.GENERATING_PHASE2:

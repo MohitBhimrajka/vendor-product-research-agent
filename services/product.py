@@ -27,7 +27,13 @@ def run_filter(base_dir, questions, answers, status_dict=None) -> List[str]:
         answers=answers,
         status_dict=status_dict
     )
-    return filtered_list if filtered_list is not None else []
+    
+    # Added additional safeguard - ensure filtered_list is a proper list
+    if filtered_list is None or not isinstance(filtered_list, list):
+        print(f"WARNING: filter_vendors_based_on_answers returned a {type(filtered_list)} instead of a list. Defaulting to empty list.")
+        return []
+        
+    return filtered_list
 
 def run_phase2(base_dir, product_category, filtered_vendors, criteria, status_dict):
     # Read context_company_name from config file if needed
